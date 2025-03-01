@@ -10,7 +10,7 @@ authors = [
     { name = "massquantity", email = "jinxin_madie@163.com" },
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "lightning>=2.4.0",
     "numpy>=1.23.5",
