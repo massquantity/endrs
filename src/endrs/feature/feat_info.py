@@ -7,11 +7,11 @@ import torch
 
 class FeatInfo:
     """A class for storing and updating feature information.
-    
+
     This class handles different types of features for users and items, including
     sparse features, dense features, and multi-sparse features. It also manages
     mappings between feature values and indices for efficient processing.
-    
+
     Parameters
     ----------
     user_sparse_feats : Sequence[str] or None, default: None
@@ -98,12 +98,20 @@ class FeatInfo:
 
     @property
     def user_multi_sparse_feats(self) -> list[str]:
-        """Get all user multi-sparse feature names, using the name of a field's first column as representative."""
+        """Get all user multi-sparse feature names.
+
+        Returns a list of representative feature names for user multi-sparse fields,
+        where each name is the first column of its respective field.
+        """
         return [field[0] for field in self.user_multi_sparse_all]
 
     @property
     def item_multi_sparse_feats(self) -> list[str]:
-        """Get all item multi-sparse feature names, using the name of a field's first column as representative."""
+        """Get all item multi-sparse feature names.
+
+        Returns a list of representative feature names for item multi-sparse fields,
+        where each name is the first column of its respective field.
+        """
         return [field[0] for field in self.item_multi_sparse_all]
 
     @staticmethod
