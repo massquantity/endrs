@@ -354,10 +354,10 @@ class TorchBase(L.LightningModule):
         else:
             self.evaluator.update_recos(batch)
 
+    # use `on_train_epoch_end` to display eval metrics after progress bar completion
     @override
-    def on_validation_epoch_end(self):
+    def on_train_epoch_end(self):
         if self.evaluator and self.evaluator.verbose >= 1:
-            # print("\n")  # Todo: avoid progress bar conflict
             self.evaluator.print_metrics()
 
     @override
