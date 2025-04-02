@@ -1,6 +1,6 @@
 import abc
 from collections.abc import Mapping, MutableMapping, Sequence
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, override
 
 import numpy as np
 import torch
@@ -140,6 +140,7 @@ class TorchEmbedBase(TorchBase):
             self.register_buffer("user_embeds_tensor", torch.empty(0))
             self.register_buffer("item_embeds_tensor", torch.empty(0))
 
+    @override
     def fit(
         self,
         train_data: BatchData,
@@ -178,14 +179,17 @@ class TorchEmbedBase(TorchBase):
             num_workers,
         )
 
+    @override
     def on_validation_epoch_start(self):
         super().on_validation_epoch_start()
         self.set_embeddings()
 
+    @override
     def on_train_end(self):
         self.set_embeddings()
         super().on_train_end()
 
+    @override
     @torch.inference_mode()
     def _pred_inner(self, users: np.ndarray, items: np.ndarray) -> np.ndarray:
         self.eval()
@@ -198,6 +202,7 @@ class TorchEmbedBase(TorchBase):
         preds = torch.sum(user_embeds * item_embeds, dim=1)
         return preds.cpu().numpy()
 
+    @override
     @torch.inference_mode()
     def _rec_inner(
         self,
@@ -238,6 +243,7 @@ class TorchEmbedBase(TorchBase):
         if self.loss not in ALL_LOSSES:
             raise ValueError(f"`loss` must be one of {ALL_LOSSES}, got {self.loss}")
 
+    @override
     def compute_loss(
         self,
         batch: Union[
@@ -380,6 +386,7 @@ class TorchEmbedBase(TorchBase):
             )
             self.item_embeds_tensor[items] = self.get_item_embeddings(item_inputs)
 
+    @override
     @torch.inference_mode()
     def assign_embed_oovs(self):
         """Assign embeddings for out-of-vocabulary (OOV) IDs."""

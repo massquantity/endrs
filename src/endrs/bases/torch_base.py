@@ -1,6 +1,6 @@
 from collections.abc import Mapping, MutableMapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import lightning as L
 import numpy as np
@@ -322,11 +322,13 @@ class TorchBase(L.LightningModule):
         )
         return evaluator.compute_eval_results()
 
+    @override
     def training_step(self, batch: MutableMapping[str, torch.Tensor]) -> torch.Tensor:
         train_loss = self.compute_loss(batch)
         self.log("train_loss", train_loss, prog_bar=True)
         return train_loss
 
+    @override
     def on_train_end(self):
         self.evaluator = None
         self.assign_embed_oovs()
@@ -335,10 +337,12 @@ class TorchBase(L.LightningModule):
             user_ids=[OOV_IDX], n_rec=n_rec, filter_consumed=False
         )[0]
 
+    @override
     def on_validation_epoch_start(self):
         if self.evaluator:
             self.evaluator.clear_state()
 
+    @override
     def validation_step(
         self,
         batch: tuple[np.ndarray, np.ndarray] | np.ndarray,
@@ -350,11 +354,13 @@ class TorchBase(L.LightningModule):
         else:
             self.evaluator.update_recos(batch)
 
+    @override
     def on_validation_epoch_end(self):
         if self.evaluator and self.evaluator.verbose >= 1:
             # print("\n")  # Todo: avoid progress bar conflict
             self.evaluator.print_metrics()
 
+    @override
     def configure_optimizers(self) -> optim.Optimizer:
         return optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.wd)
 

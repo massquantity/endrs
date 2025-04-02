@@ -1,6 +1,6 @@
 import abc
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, override
 
 import numpy as np
 import torch
@@ -194,6 +194,7 @@ class DynEmbedBase(TorchEmbedBase):
             embedding = embedding.cpu().numpy().squeeze(axis=0)
         return embedding
 
+    @override
     @torch.inference_mode()
     def recommend_user(
         self,
@@ -279,6 +280,7 @@ class DynEmbedBase(TorchEmbedBase):
         # only one user is allowed in dynamic situation
         return {user: rec_items}
 
+    @override
     @torch.inference_mode()
     def assign_embed_oovs(self):
         """Assign out-of-vocabulary embeddings for all embedding layers.
