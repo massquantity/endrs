@@ -1,4 +1,5 @@
 from collections.abc import Mapping, MutableMapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, override
 
@@ -40,6 +41,7 @@ from endrs.torchops.loss import (
 )
 from endrs.types import ItemId, UserId
 from endrs.utils.constants import LABEL_KEY, LISTWISE_LOSS, OOV_IDX, PAIRWISE_LOSS
+from endrs.utils.logger import get_logger
 from endrs.utils.misc import LightningProgressBar
 from endrs.utils.validate import check_labels, check_multi_labels
 
@@ -329,6 +331,14 @@ class TorchBase(L.LightningModule):
         return train_loss
 
     @override
+    def on_train_start(self):
+        if self.evaluator:
+            logger = get_logger()
+            if logger is not None:
+                cur_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                logger.bind(task="metrics_file").info(f"start time: {cur_time}\n")
+
+    @override
     def on_train_end(self):
         self.evaluator = None
         self.assign_embed_oovs()
@@ -358,7 +368,7 @@ class TorchBase(L.LightningModule):
     @override
     def on_train_epoch_end(self):
         if self.evaluator and self.evaluator.verbose >= 1:
-            self.evaluator.print_metrics()
+            self.evaluator.log_metrics(self.current_epoch)
 
     @override
     def configure_optimizers(self) -> optim.Optimizer:
