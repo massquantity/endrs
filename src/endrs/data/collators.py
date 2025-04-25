@@ -2,6 +2,7 @@ import dataclasses
 
 import numpy as np
 import torch
+from torch.utils.data import get_worker_info
 
 from endrs.data.batch import Batch, label_sampling, multi_label_sampling
 from endrs.data.data_info import DataInfo
@@ -136,7 +137,7 @@ class BaseCollator:
 
     def _set_random_seeds(self):
         if self.np_rng is None:
-            worker_info = torch.utils.data.get_worker_info()
+            worker_info = get_worker_info()
             if worker_info is None:
                 worker_id = 0
             else:
