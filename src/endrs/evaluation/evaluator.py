@@ -213,6 +213,57 @@ class Evaluator:
         )
         self.recos.update(batch_recos)
 
+    def _compute_rating_metrics(self) -> dict[str, float]:
+        result = {}
+        for m in self.metrics:
+            if m in ("rmse", "loss"):
+                result[m] = rmse(self.pred_labels, self.preds)
+            elif m == "mae":
+                result[m] = mean_absolute_error(self.pred_labels, self.preds)
+            elif m == "r2":
+                result[m] = r2_score(self.pred_labels, self.preds)
+        return result
+
+    def _compute_ranking_pointwise_metrics(self) -> dict[str, float]:
+        result = {}
+        for m in self.metrics:
+            if m in ("log_loss", "loss"):
+                result[m] = log_loss(self.pred_labels, self.preds)
+            elif m == "roc_auc":
+                result[m] = roc_auc_score(self.pred_labels, self.preds)
+            elif m == "roc_gauc":
+                result[m] = roc_gauc_score(
+                    self.pred_labels, self.preds, self.data.users
+                )
+            elif m == "pr_auc":
+                result[m] = pr_auc_score(self.pred_labels, self.preds)
+        return result
+
+    def _compute_ranking_listwise_metrics(self, users: list[int]) -> dict[str, float]:
+        result = {}
+        for m in self.metrics:
+            if m not in LISTWISE_METRICS:
+                continue
+            if m == "coverage":
+                result[m] = rec_coverage(self.recos, users, self.n_items)
+            elif m == "precision":
+                result[m] = listwise_scores(
+                    precision_at_k, self.reco_labels, self.recos, users, self.k
+                )
+            elif m == "recall":
+                result[m] = listwise_scores(
+                    recall_at_k, self.reco_labels, self.recos, users, self.k
+                )
+            elif m == "map":
+                result[m] = listwise_scores(
+                    map_at_k, self.reco_labels, self.recos, users, self.k
+                )
+            elif m == "ndcg":
+                result[m] = listwise_scores(
+                    ndcg_at_k, self.reco_labels, self.recos, users, self.k
+                )
+        return result
+
     def compute_eval_results(self) -> dict[str, float]:
         """Compute evaluation metrics on the current data.
         
@@ -241,55 +292,16 @@ class Evaluator:
                 else:
                     self.update_recos(batch)
 
-        eval_result = dict()
         if self.task == "rating":
-            for m in self.metrics:
-                if m in ("rmse", "loss"):
-                    eval_result[m] = rmse(self.pred_labels, self.preds)
-                elif m == "mae":
-                    eval_result[m] = mean_absolute_error(self.pred_labels, self.preds)
-                elif m == "r2":
-                    eval_result[m] = r2_score(self.pred_labels, self.preds)
-        else:
-            if self.need_preds:
-                for m in self.metrics:
-                    if m in ("log_loss", "loss"):
-                        eval_result[m] = log_loss(self.pred_labels, self.preds)
-                    elif m == "roc_auc":
-                        eval_result[m] = roc_auc_score(self.pred_labels, self.preds)
-                    elif m == "roc_gauc":
-                        eval_result[m] = roc_gauc_score(
-                            self.pred_labels, self.preds, self.data.users
-                        )
-                    elif m == "pr_auc":
-                        eval_result[m] = pr_auc_score(self.pred_labels, self.preds)
+            return self._compute_rating_metrics()
 
-            if self.need_recos:
-                for m in self.metrics:
-                    if m not in LISTWISE_METRICS:
-                        continue
-
-                    users = self.sample_users()
-                    if m == "coverage":
-                        eval_result[m] = rec_coverage(self.recos, users, self.n_items)
-                    elif m == "precision":
-                        eval_result[m] = listwise_scores(
-                            precision_at_k, self.reco_labels, self.recos, users, self.k
-                        )
-                    elif m == "recall":
-                        eval_result[m] = listwise_scores(
-                            recall_at_k, self.reco_labels, self.recos, users, self.k
-                        )
-                    elif m == "map":
-                        eval_result[m] = listwise_scores(
-                            map_at_k, self.reco_labels, self.recos, users, self.k
-                        )
-                    elif m == "ndcg":
-                        eval_result[m] = listwise_scores(
-                            ndcg_at_k, self.reco_labels, self.recos, users, self.k
-                        )
-
-        return eval_result
+        result = {}
+        if self.need_preds:
+            result.update(self._compute_ranking_pointwise_metrics())
+        if self.need_recos:
+            users = self.sample_users()
+            result.update(self._compute_ranking_listwise_metrics(users))
+        return result
 
     def log_metrics(self, epoch: int):
         message = ""
@@ -309,16 +321,6 @@ class Evaluator:
             logger.bind(task="metrics_file").info(message)
         else:
             tqdm.write(message)
-
-    # def print_metrics(self):
-    #     eval_metrics = self.compute_eval_results()
-    #     for m, val in eval_metrics.items():
-    #         if m in LISTWISE_METRICS:
-    #             metric = f"{m}@{self.k}"
-    #         else:
-    #             metric = m
-    #         str_val = f"{round(val, 2)}%" if m == "coverage" else f"{val:.4f}"
-    #         tqdm.write(f"\t eval {metric}: {str_val}")
 
     def clear_state(self):
         """Clear all stored prediction and recommendation data."""
@@ -344,15 +346,13 @@ class Evaluator:
         if not isinstance(metrics, list | tuple):
             metrics = [metrics]
 
-        if self.task == "rating":
-            for m in metrics:
-                if m not in RATING_METRICS:
-                    raise ValueError(f"Metrics `{m}` is not suitable for rating task...")
-        elif self.task == "ranking":
-            for m in metrics:
-                if m not in RANKING_METRICS:
-                    raise ValueError(f"Metrics `{m}` is not suitable for ranking task...")
-
+        valid_metrics = RATING_METRICS if self.task == "rating" else RANKING_METRICS
+        invalid_metrics = [m for m in metrics if m not in valid_metrics]
+        if invalid_metrics:
+            raise ValueError(
+                f"Metrics {invalid_metrics} are not suitable for {self.task} task. "
+                f"Valid metrics are: {valid_metrics}"
+            )
         return metrics
 
     def sample_users(self) -> list[int]:
