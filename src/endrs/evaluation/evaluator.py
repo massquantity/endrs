@@ -29,7 +29,7 @@ from endrs.utils.constants import (
     RANKING_METRICS,
     RATING_METRICS,
 )
-from endrs.utils.logger import get_logger
+from endrs.utils.logger import is_logger_ready, logger
 from endrs.utils.validate import check_data_cols
 
 
@@ -314,8 +314,7 @@ class Evaluator:
             str_val = f"{round(val, 2)}%" if m == "coverage" else f"{val:.4f}"
             message += f"    eval {metric}: {str_val}\n"
 
-        logger = get_logger()
-        if logger is not None:
+        if is_logger_ready():
             logger.bind(task="metrics").info(message)
             message = f"Epoch {epoch + 1}:\n" + message
             logger.bind(task="metrics_file").info(message)

@@ -41,7 +41,7 @@ from endrs.torchops.loss import (
 )
 from endrs.types import ItemId, UserId
 from endrs.utils.constants import LABEL_KEY, LISTWISE_LOSS, OOV_IDX, PAIRWISE_LOSS
-from endrs.utils.logger import get_logger
+from endrs.utils.logger import is_logger_ready, logger
 from endrs.utils.misc import LightningProgressBar
 from endrs.utils.validate import check_labels, check_multi_labels
 
@@ -333,8 +333,7 @@ class TorchBase(L.LightningModule):
     @override
     def on_train_start(self):
         if self.evaluator:
-            logger = get_logger()
-            if logger is not None:
+            if is_logger_ready():
                 cur_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 logger.bind(task="metrics_file").info(f"start time: {cur_time}\n")
 

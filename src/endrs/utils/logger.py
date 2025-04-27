@@ -2,10 +2,8 @@ import sys
 from pathlib import Path
 
 from loguru import logger
-from loguru._logger import Logger as LoggerType
 
-_logger: LoggerType | None = None
-
+logger.is_ready = False
 
 # def custom_formatter(record: dict[str, Any]) -> str:
 #    return record["extra"]["metrics"]
@@ -28,9 +26,8 @@ def setup_logger(
     add_normal_logger(log_level, log_path, log_file)
     add_metrics_logger(log_level, log_path, metrics_file)
 
-    global _logger
-    _logger = logger
-    _logger.bind(task="normal").info(f"Logging setup completed!")
+    logger.bind(task="normal").info(f"Logging setup completed!")
+    logger.is_ready = True
 
 
 def add_normal_logger(log_level: str, log_path: Path, log_file: str):
@@ -67,9 +64,8 @@ def add_metrics_logger(log_level: str, log_path: Path, metrics_file: str):
 
 
 def remove_logger():
-    global _logger
-    _logger = None
+    logger.is_ready = False
 
 
-def get_logger() -> LoggerType:
-    return _logger
+def is_logger_ready() -> bool:
+    return logger.is_ready
