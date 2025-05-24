@@ -40,7 +40,7 @@ class Evaluator:
     ----------
     during_training : bool
         Whether the evaluation is occurring during model training.
-    data : EvalBatchData or pd.DataFrame
+    data : :class:`~endrs.data.EvalBatchData` or :class:`pandas.DataFrame`
         The evaluation dataset, either as a batch data object or a pandas DataFrame.
     model : :type:`~endrs.types.RecModel`
         The recommendation model to evaluate.
@@ -118,17 +118,17 @@ class Evaluator:
 
     def build_eval_data(self, data: EvalBatchData | pd.DataFrame) -> EvalBatchData:
         """Convert input data to evaluation batch data format.
-        
+
         Parameters
         ----------
-        data : EvalBatchData or pd.DataFrame
+        data : :class:`~endrs.data.EvalBatchData` or :class:`pandas.DataFrame`
             The evaluation data, either already in batch format or as a DataFrame.
-            
+
         Returns
         -------
         EvalBatchData
             Processed evaluation data ready for metrics computation.
-            
+
         Raises
         ------
         ValueError
@@ -276,7 +276,7 @@ class Evaluator:
         dict[str, float]
             Dictionary mapping metric names to their computed values.
         """
-        # during training, states will be updated in `validation_step()`
+        # If during training, states will be updated in `validation_step()`
         if not self.during_training:
             combined_loader = iter(self.build_data_loader())
             disable = True if self.verbose < 2 else False
