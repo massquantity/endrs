@@ -26,7 +26,7 @@ def setup_logger(
     add_normal_logger(log_level, log_path, log_file)
     add_metrics_logger(log_level, log_path, metrics_file)
 
-    logger.bind(task="normal").info(f"Logging setup completed!")
+    logger.bind(task="normal").info("Logging setup completed!")
     logger.is_ready = True
 
 
