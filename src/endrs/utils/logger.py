@@ -69,3 +69,10 @@ def remove_logger():
 
 def is_logger_ready() -> bool:
     return logger.is_ready
+
+
+def normal_log(message: str):
+    if is_logger_ready():
+        logger.bind(task="normal").info(message)
+    else:
+        print(message)
