@@ -11,7 +11,6 @@ from lightning import Callback, seed_everything
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from torch import optim
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
-from tqdm import tqdm
 
 from endrs.data.batch import BatchData, EvalBatchData
 from endrs.data.collators import BaseCollator as Collator, PairwiseCollator
@@ -43,7 +42,7 @@ from endrs.torchops.loss import (
 )
 from endrs.types import ItemId, UserId
 from endrs.utils.constants import LABEL_KEY, LISTWISE_LOSS, OOV_IDX, PAIRWISE_LOSS
-from endrs.utils.logger import is_logger_ready, logger
+from endrs.utils.logger import is_logger_ready, logger, normal_log
 from endrs.utils.misc import LightningProgressBar
 from endrs.utils.validate import check_labels, check_multi_labels
 
@@ -161,9 +160,11 @@ class TorchBase(L.LightningModule):
             task, self.user_consumed, self.np_rng, self.cand_items
         )
         self.is_multi_task = False
+        self.trainer = None
         self.evaluator = None
         self.seq_params = None
         self.checkpoint_callback = None
+        self.ckpt_path = None
         self.verbose = 0
         self.save_hyperparameters()
         seed_everything(seed, workers=True)
@@ -263,7 +264,7 @@ class TorchBase(L.LightningModule):
             enable_pbar, leave, enable_early_stopping, patience, checkpoint_path
         )
 
-        trainer = L.Trainer(
+        self.trainer = L.Trainer(
             accelerator=self.accelerator,
             devices=self.devices,
             max_epochs=self.n_epochs,
@@ -279,13 +280,14 @@ class TorchBase(L.LightningModule):
             default_root_dir=Path.cwd(),
             callbacks=callbacks,
         )
-        trainer.fit(
+        self.trainer.fit(
             model=self,
             train_dataloaders=train_dataloader,
             val_dataloaders=val_combined_dataloader,
+            ckpt_path=self.ckpt_path
         )
 
-        if self.checkpoint_callback:
+        if enable_early_stopping and self.checkpoint_callback:
             self.load_best_model()
 
     def get_callbacks(
@@ -320,9 +322,7 @@ class TorchBase(L.LightningModule):
             else:
                 ckpt_path = Path(checkpoint_path) / f"run_{timestamp}"
 
-            if is_logger_ready():
-                logger.bind(task="normal").info(f"Checkpoints path: {ckpt_path}")
-
+            normal_log(f"Checkpoints path: {ckpt_path}")
             checkpoint_callback = ModelCheckpoint(
                 dirpath=ckpt_path,
                 filename="best-model-{epoch:02d}-{val_loss:.4f}",
@@ -342,11 +342,18 @@ class TorchBase(L.LightningModule):
         with torch.inference_mode():
             self.load_state_dict(checkpoint["state_dict"])
 
-        message = f"Early stopping triggered. Best model loaded from {best_model_path}"
-        if is_logger_ready():
-            logger.bind(task="normal").info(message)
-        else:
-            tqdm.write(message)
+        normal_log(f"Early stopping triggered. Best model loaded from {best_model_path}")
+
+    def save(self, checkpoint_path: str):
+        path_obj = Path(checkpoint_path)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        self.trainer.save_checkpoint(path_obj)
+
+    @classmethod
+    def load(cls, checkpoint_path: str) -> "TorchBase":
+        model = cls.load_from_checkpoint(checkpoint_path)
+        model.ckpt_path = checkpoint_path
+        return model
 
     def evaluate(
         self,
