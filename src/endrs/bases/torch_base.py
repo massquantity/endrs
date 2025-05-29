@@ -1,15 +1,17 @@
 from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, override
+from typing import Any, Union, override
 
 import lightning as L
 import numpy as np
 import pandas as pd
 import torch
-from lightning import seed_everything
+from lightning import Callback, seed_everything
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from torch import optim
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
+from tqdm import tqdm
 
 from endrs.data.batch import BatchData, EvalBatchData
 from endrs.data.collators import BaseCollator as Collator, PairwiseCollator
@@ -109,6 +111,8 @@ class TorchBase(L.LightningModule):
         Evaluator object for model evaluation.
     seq_params : :class:`~endrs.data.sequence.SeqParams` or None
         Parameters for sequential recommendation.
+    checkpoint_callback : :class:`~lightning.pytorch.callbacks.ModelCheckpoint` or None
+        Callback for restoring the best model after early stopping.
     """
 
     def __init__(
@@ -159,7 +163,9 @@ class TorchBase(L.LightningModule):
         self.is_multi_task = False
         self.evaluator = None
         self.seq_params = None
+        self.checkpoint_callback = None
         self.verbose = 0
+        self.save_hyperparameters()
         seed_everything(seed, workers=True)
 
     def fit(
@@ -174,6 +180,9 @@ class TorchBase(L.LightningModule):
         eval_batch_size: int = 8192,
         eval_user_num: int | None = None,
         num_workers: int = 0,
+        enable_early_stopping: bool = False,
+        patience: int = 3,
+        checkpoint_path: str | None = None,
     ):
         """Train the model on the provided data.
 
@@ -239,14 +248,21 @@ class TorchBase(L.LightningModule):
         train_dataloader = self.get_batch_loader(
             train_data, neg_sampling, self.batch_size, shuffle, num_workers
         )
-        eval_dataloader = (
-            self.evaluator.build_data_loader() if self.evaluator else None
-        )
-        # TODO: enable_checkpointing, enable_model_summary(verbose >= 2), early stopping
+        if eval_data:
+            val_dataloader = self.get_batch_loader(
+                eval_data, neg_sampling, eval_batch_size, shuffle=False, num_workers=0
+            )
+            val_combined_dataloader = self.evaluator.build_data_loader(val_dataloader)
+        else:
+            val_combined_dataloader = None
+
         enable_pbar = True if verbose >= 2 else False
         leave = True if verbose >= 3 else False
         enable_model_summary = True if verbose >= 3 else False
-        callbacks = [LightningProgressBar(self.name, leave)] if enable_pbar else None
+        callbacks = self.get_callbacks(
+            enable_pbar, leave, enable_early_stopping, patience, checkpoint_path
+        )
+
         trainer = L.Trainer(
             accelerator=self.accelerator,
             devices=self.devices,
@@ -254,7 +270,7 @@ class TorchBase(L.LightningModule):
             check_val_every_n_epoch=1,
             logger=False,
             log_every_n_steps=0,
-            enable_checkpointing=False,
+            enable_checkpointing=enable_early_stopping,
             enable_progress_bar=enable_pbar,
             enable_model_summary=enable_model_summary,
             accumulate_grad_batches=1,
@@ -266,8 +282,71 @@ class TorchBase(L.LightningModule):
         trainer.fit(
             model=self,
             train_dataloaders=train_dataloader,
-            val_dataloaders=eval_dataloader,
+            val_dataloaders=val_combined_dataloader,
         )
+
+        if self.checkpoint_callback:
+            self.load_best_model()
+
+    def get_callbacks(
+        self,
+        enable_pbar: bool,
+        leave: bool,
+        enable_early_stopping: bool,
+        patience: int,
+        checkpoint_path: str | None,
+    ) -> list[Callback] | None:
+        if not enable_pbar and not enable_early_stopping:
+            return
+
+        callbacks = []
+        if enable_pbar:
+            progress_bar_callback = LightningProgressBar(self.name, leave)
+            callbacks.append(progress_bar_callback)
+
+        if enable_early_stopping:
+            early_stop_callback = EarlyStopping(
+                monitor="val_loss",
+                min_delta=0.0001,
+                patience=patience,
+                mode="min",
+                verbose=True,
+            )
+            callbacks.append(early_stop_callback)
+
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            if not checkpoint_path:
+                ckpt_path = Path.cwd() / "checkpoints" / f"run_{timestamp}"
+            else:
+                ckpt_path = Path(checkpoint_path) / f"run_{timestamp}"
+
+            if is_logger_ready():
+                logger.bind(task="normal").info(f"Checkpoints path: {ckpt_path}")
+
+            checkpoint_callback = ModelCheckpoint(
+                dirpath=ckpt_path,
+                filename="best-model-{epoch:02d}-{val_loss:.4f}",
+                monitor="val_loss",
+                save_top_k=1,
+                mode="min",
+                verbose=True,
+            )
+            callbacks.append(checkpoint_callback)
+            self.checkpoint_callback = checkpoint_callback
+
+        return callbacks
+
+    def load_best_model(self):
+        best_model_path = self.checkpoint_callback.best_model_path
+        checkpoint = torch.load(best_model_path, map_location=self.device)
+        with torch.inference_mode():
+            self.load_state_dict(checkpoint["state_dict"])
+
+        message = f"Early stopping triggered. Best model loaded from {best_model_path}"
+        if is_logger_ready():
+            logger.bind(task="normal").info(message)
+        else:
+            tqdm.write(message)
 
     def evaluate(
         self,
@@ -334,7 +413,7 @@ class TorchBase(L.LightningModule):
     def on_train_start(self):
         if self.evaluator:
             if is_logger_ready():
-                cur_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                cur_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 logger.bind(task="metrics_file").info(f"start time: {cur_time}\n")
 
     @override
@@ -354,11 +433,25 @@ class TorchBase(L.LightningModule):
     @override
     def validation_step(
         self,
-        batch: tuple[np.ndarray, np.ndarray] | np.ndarray,
+        batch: Union[
+            MutableMapping[str, torch.Tensor],
+            tuple[np.ndarray, np.ndarray],
+            np.ndarray,
+        ],
         batch_idx: int,
-        dataloader_idx: int
+        dataloader_idx: int,
     ):
         if dataloader_idx == 0:
+            val_loss = self.compute_loss(batch)
+            self.log(
+                "val_loss",
+                val_loss,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+                add_dataloader_idx=False,
+            )
+        elif dataloader_idx == 1:
             self.evaluator.update_preds(batch)
         else:
             self.evaluator.update_recos(batch)

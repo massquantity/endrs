@@ -162,19 +162,20 @@ class Evaluator:
             )
         return data
 
-    def build_data_loader(self) -> CombinedLoader:
+    def build_data_loader(self, val_loader: DataLoader | None = None) -> CombinedLoader:
         """Create data loaders for model evaluation.
 
-        Creates loaders for both pointwise prediction (if needed by metrics) and
-        listwise recommendation evaluation (if needed by metrics). Uses PyTorch Lightning's
-        CombinedLoader to handle multiple loader types efficiently.
+        Parameters
+        ----------
+        val_loader : :class:`torch.utils.data.DataLoader` or None, default: None
 
         Returns
         -------
         CombinedLoader
             A PyTorch Lightning combined loader that sequentially yields batches
-            from both prediction and recommendation loaders.
+            from validation, prediction and recommendation loaders.
         """
+        val_loader = val_loader or []
         pred_loader, reco_loader = [], []
         if self.need_preds:
             sampler = SequentialSampler(self.data)
@@ -196,7 +197,7 @@ class Evaluator:
                 collate_fn=lambda x: x,
                 num_workers=self.num_workers,
             )
-        return CombinedLoader([pred_loader, reco_loader], mode="sequential")
+        return CombinedLoader([val_loader, pred_loader, reco_loader], mode="sequential")
 
     def update_preds(self, batch: tuple[np.ndarray, np.ndarray]):
         users, items = batch
@@ -266,11 +267,11 @@ class Evaluator:
 
     def compute_eval_results(self) -> dict[str, float]:
         """Compute evaluation metrics on the current data.
-        
+
         If not during training, first generates predictions and recommendations
         for all evaluation data. Then computes all specified metrics based on the
         task type (rating or ranking).
-        
+
         Returns
         -------
         dict[str, float]
@@ -288,6 +289,8 @@ class Evaluator:
                 leave=leave,
             ):
                 if dataloader_idx == 0:
+                    continue
+                elif dataloader_idx == 1:
                     self.update_preds(batch)
                 else:
                     self.update_recos(batch)
