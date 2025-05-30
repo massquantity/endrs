@@ -257,7 +257,7 @@ class TorchBase(L.LightningModule):
         enable_pbar = True if verbose >= 2 else False
         leave = True if verbose >= 3 else False
         enable_model_summary = True if verbose >= 3 else False
-        callbacks, checkpoint_callback = self.get_callbacks(
+        callbacks = self.get_callbacks(
             enable_pbar, leave, enable_early_stopping, patience, checkpoint_path
         )
 
@@ -284,8 +284,8 @@ class TorchBase(L.LightningModule):
             ckpt_path=self.ckpt_path
         )
 
-        if enable_early_stopping and checkpoint_callback:
-            self.load_best_model(checkpoint_callback)
+        if enable_early_stopping and callbacks:
+            self.load_best_model(callbacks, verbose)
 
     def get_callbacks(
         self,
@@ -294,16 +294,15 @@ class TorchBase(L.LightningModule):
         enable_early_stopping: bool,
         patience: int,
         checkpoint_path: str | None,
-    ) -> tuple[list[Callback] | None, ModelCheckpoint | None]:
+    ) -> list[Callback] | None:
         if not enable_pbar and not enable_early_stopping:
-            return None, None
+            return
 
         callbacks = []
         if enable_pbar:
             progress_bar_callback = LightningProgressBar(self.name, leave)
             callbacks.append(progress_bar_callback)
 
-        checkpoint_callback = None
         if enable_early_stopping:
             early_stop_callback = EarlyStopping(
                 monitor="val_loss",
@@ -320,7 +319,6 @@ class TorchBase(L.LightningModule):
             else:
                 ckpt_path = Path(checkpoint_path) / f"run_{timestamp}"
 
-            normal_log(f"Checkpoints path: {ckpt_path}")
             checkpoint_callback = ModelCheckpoint(
                 dirpath=ckpt_path,
                 filename="ckpt-{epoch:02d}-{val_loss:.4f}",
@@ -331,15 +329,25 @@ class TorchBase(L.LightningModule):
             )
             callbacks.append(checkpoint_callback)
 
-        return callbacks, checkpoint_callback
+        return callbacks
 
-    def load_best_model(self, checkpoint_callback: ModelCheckpoint):
+    def load_best_model(self, callbacks: list[Callback], verbose: int):
+        checkpoint_callback = None
+        for callback in callbacks:
+            if isinstance(callback, ModelCheckpoint):
+                checkpoint_callback = callback
+                break
+
+        if not checkpoint_callback:
+            return
+
         best_model_path = checkpoint_callback.best_model_path
         checkpoint = torch.load(best_model_path, map_location=self.device)
         with torch.inference_mode():
             self.load_state_dict(checkpoint["state_dict"])
 
-        normal_log(f"Early stopping triggered. Best model loaded from {best_model_path}")
+        if verbose > 0:
+            normal_log(f"Early stopping triggered. Best model loaded from {best_model_path}")
 
     def save(self, checkpoint_path: str):
         path_obj = Path(checkpoint_path)
