@@ -224,6 +224,13 @@ class TorchBase(L.LightningModule):
             .. CAUTION::
                Using multiprocessing(``num_workers`` > 0) may consume more memory than
                single processing. See `Multi-process data loading <https://pytorch.org/docs/stable/data.html#multi-process-data-loading>`_.
+
+        enable_early_stopping : bool, default: False
+            Whether to enable early stopping during training.
+        patience : int, default: 3
+            Number of epochs with no improvement after which training will be stopped.
+        checkpoint_path : str or None, default: None
+            Path to save model checkpoints during training.
         """
         self.check_data_labels(train_data, neg_sampling)
         if eval_data:
