@@ -110,8 +110,6 @@ class TorchBase(L.LightningModule):
         Evaluator object for model evaluation.
     seq_params : :class:`~endrs.data.sequence.SeqParams` or None
         Parameters for sequential recommendation.
-    checkpoint_callback : :class:`~lightning.pytorch.callbacks.ModelCheckpoint` or None
-        Callback for restoring the best model after early stopping.
     """
 
     def __init__(
@@ -163,7 +161,6 @@ class TorchBase(L.LightningModule):
         self.trainer = None
         self.evaluator = None
         self.seq_params = None
-        self.checkpoint_callback = None
         self.ckpt_path = None
         self.verbose = 0
         self.save_hyperparameters()
@@ -260,7 +257,7 @@ class TorchBase(L.LightningModule):
         enable_pbar = True if verbose >= 2 else False
         leave = True if verbose >= 3 else False
         enable_model_summary = True if verbose >= 3 else False
-        callbacks = self.get_callbacks(
+        callbacks, checkpoint_callback = self.get_callbacks(
             enable_pbar, leave, enable_early_stopping, patience, checkpoint_path
         )
 
@@ -287,8 +284,8 @@ class TorchBase(L.LightningModule):
             ckpt_path=self.ckpt_path
         )
 
-        if enable_early_stopping and self.checkpoint_callback:
-            self.load_best_model()
+        if enable_early_stopping and checkpoint_callback:
+            self.load_best_model(checkpoint_callback)
 
     def get_callbacks(
         self,
@@ -297,15 +294,16 @@ class TorchBase(L.LightningModule):
         enable_early_stopping: bool,
         patience: int,
         checkpoint_path: str | None,
-    ) -> list[Callback] | None:
+    ) -> tuple[list[Callback] | None, ModelCheckpoint | None]:
         if not enable_pbar and not enable_early_stopping:
-            return
+            return None, None
 
         callbacks = []
         if enable_pbar:
             progress_bar_callback = LightningProgressBar(self.name, leave)
             callbacks.append(progress_bar_callback)
 
+        checkpoint_callback = None
         if enable_early_stopping:
             early_stop_callback = EarlyStopping(
                 monitor="val_loss",
@@ -325,19 +323,18 @@ class TorchBase(L.LightningModule):
             normal_log(f"Checkpoints path: {ckpt_path}")
             checkpoint_callback = ModelCheckpoint(
                 dirpath=ckpt_path,
-                filename="best-model-{epoch:02d}-{val_loss:.4f}",
+                filename="ckpt-{epoch:02d}-{val_loss:.4f}",
                 monitor="val_loss",
-                save_top_k=1,
+                save_top_k=patience,
                 mode="min",
                 verbose=True,
             )
             callbacks.append(checkpoint_callback)
-            self.checkpoint_callback = checkpoint_callback
 
-        return callbacks
+        return callbacks, checkpoint_callback
 
-    def load_best_model(self):
-        best_model_path = self.checkpoint_callback.best_model_path
+    def load_best_model(self, checkpoint_callback: ModelCheckpoint):
+        best_model_path = checkpoint_callback.best_model_path
         checkpoint = torch.load(best_model_path, map_location=self.device)
         with torch.inference_mode():
             self.load_state_dict(checkpoint["state_dict"])
