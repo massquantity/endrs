@@ -27,7 +27,7 @@ from endrs.utils.constants import (
 
 class TorchEmbedBase(TorchBase):
     """Base class for embedding-based recommender systems using PyTorch Lightning.
-    
+
     Parameters
     ----------
     task : {'rating', 'ranking'}
@@ -77,7 +77,7 @@ class TorchEmbedBase(TorchBase):
         Devices to use for training.
     paradigm : {'u2i', 'i2i'}, default: 'u2i'
         Recommendation paradigm: user-to-item (u2i) or item-to-item (i2i).
-    
+
     Attributes
     ----------
     user_embeds_tensor : torch.Tensor
@@ -135,10 +135,19 @@ class TorchEmbedBase(TorchBase):
         self.remove_accidental_hits = remove_accidental_hits
         self.paradigm = paradigm
         if self.use_hash:
-            self.register_buffer("hash_embeds_tensor", torch.empty(0))
+            hash_embeds_tensor = torch.zeros(
+                self.data_info.n_hash_bins + 1, self.embed_size, device=self.device
+            )
+            self.register_buffer("hash_embeds_tensor", hash_embeds_tensor)
         else:
-            self.register_buffer("user_embeds_tensor", torch.empty(0))
-            self.register_buffer("item_embeds_tensor", torch.empty(0))
+            user_embeds_tensor = torch.zeros(
+                self.n_users + 1, self.embed_size, device=self.device
+            )
+            item_embeds_tensor = torch.zeros(
+                self.n_items + 1, self.embed_size, device=self.device
+            )
+            self.register_buffer("user_embeds_tensor", user_embeds_tensor)
+            self.register_buffer("item_embeds_tensor", item_embeds_tensor)
 
     @override
     def fit(
@@ -153,6 +162,9 @@ class TorchEmbedBase(TorchBase):
         eval_batch_size: int = 8192,
         eval_user_num: int | None = None,
         num_workers: int = 0,
+        enable_early_stopping: bool = False,
+        patience: int = 3,
+        checkpoint_path: str | None = None,
     ):
         if self.loss == "softmax" and self.use_correction:
             num = self.data_info.n_hash_bins + 1 if self.use_hash else self.n_items + 1
@@ -177,6 +189,9 @@ class TorchEmbedBase(TorchBase):
             eval_batch_size,
             eval_user_num,
             num_workers,
+            enable_early_stopping,
+            patience,
+            checkpoint_path,
         )
 
     @override
@@ -371,19 +386,10 @@ class TorchEmbedBase(TorchBase):
         item_inputs = get_item_inputs(items, self.feat_info, self.device)
 
         if self.use_hash:
-            self.hash_embeds_tensor = torch.zeros(
-                self.data_info.n_hash_bins + 1, self.embed_size, device=self.device
-            )
             self.hash_embeds_tensor[users] = self.get_user_embeddings(user_inputs)
             self.hash_embeds_tensor[items] = self.get_item_embeddings(item_inputs)
         else:
-            self.user_embeds_tensor = torch.zeros(
-                self.n_users + 1, self.embed_size, device=self.device
-            )
             self.user_embeds_tensor[users] = self.get_user_embeddings(user_inputs)
-            self.item_embeds_tensor = torch.zeros(
-                self.n_items + 1, self.embed_size, device=self.device
-            )
             self.item_embeds_tensor[items] = self.get_item_embeddings(item_inputs)
 
     @override
