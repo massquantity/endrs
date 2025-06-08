@@ -162,6 +162,7 @@ class TorchBase(L.LightningModule):
         self.evaluator = None
         self.seq_params = None
         self.ckpt_path = None
+        self.default_recs = None
         self.verbose = 0
         self.save_hyperparameters()
         seed_everything(seed, workers=True)
@@ -231,6 +232,7 @@ class TorchBase(L.LightningModule):
             Number of epochs with no improvement after which training will be stopped.
         checkpoint_path : str or None, default: None
             Path to save model checkpoints during training.
+            If None, checkpoints will be saved to current path.
         """
         self.check_data_labels(train_data, neg_sampling)
         if eval_data:
@@ -288,7 +290,7 @@ class TorchBase(L.LightningModule):
             model=self,
             train_dataloaders=train_dataloader,
             val_dataloaders=val_combined_dataloader,
-            ckpt_path=self.ckpt_path
+            ckpt_path=self.ckpt_path,
         )
 
         if enable_early_stopping and callbacks:
@@ -328,9 +330,11 @@ class TorchBase(L.LightningModule):
 
             checkpoint_callback = ModelCheckpoint(
                 dirpath=ckpt_path,
-                filename="ckpt-{epoch:02d}-{val_loss:.4f}",
+                filename="model-{epoch:02d}-{val_loss:.4f}",
                 monitor="val_loss",
+                save_last=True,
                 save_top_k=patience,
+                save_weights_only=True,
                 mode="min",
                 verbose=True,
             )
@@ -355,17 +359,6 @@ class TorchBase(L.LightningModule):
 
         if verbose > 0:
             normal_log(f"Early stopping triggered. Best model loaded from {best_model_path}")
-
-    def save(self, checkpoint_path: str):
-        path_obj = Path(checkpoint_path)
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        self.trainer.save_checkpoint(path_obj)
-
-    @classmethod
-    def load(cls, checkpoint_path: str) -> "TorchBase":
-        model = cls.load_from_checkpoint(checkpoint_path)
-        model.ckpt_path = checkpoint_path
-        return model
 
     def evaluate(
         self,
@@ -669,7 +662,9 @@ class TorchBase(L.LightningModule):
         """
         self.check_dynamic_rec_feats(user, user_feats, seq)
         if n_rec > self.n_items:
-            raise ValueError(f"`n_rec` {n_rec} exceeds num of items {self.n_items}")
+            raise ValueError(
+                f"Cannot recommend {n_rec} items when only {self.n_items} items exist in the dataset."
+            )
 
         result_recs = dict()
         user_ids, unknown_users = sep_unknown_users(self.id_converter, user, inner_id)
@@ -810,3 +805,22 @@ class TorchBase(L.LightningModule):
             raise ValueError("`seq` must be list.")
         if user_feats is not None and not isinstance(user_feats, dict):
             raise ValueError("`user_feats` must be `dict`.")
+
+    def save(self, checkpoint_path: str):
+        path_obj = Path(checkpoint_path)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        self.trainer.save_checkpoint(path_obj)
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]):
+        if self.default_recs is not None:
+            checkpoint["default_recs"] = self.default_recs
+
+    @classmethod
+    def load(cls, checkpoint_path: str) -> "TorchBase":
+        model: TorchBase = cls.load_from_checkpoint(checkpoint_path)
+        model.ckpt_path = checkpoint_path
+        return model
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]):
+        if "default_recs" in checkpoint:
+            self.default_recs = checkpoint["default_recs"]
