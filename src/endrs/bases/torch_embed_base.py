@@ -254,10 +254,6 @@ class TorchEmbedBase(TorchBase):
     def get_item_embeddings(self, inputs: Mapping[str, torch.Tensor]) -> torch.Tensor:
         """Compute item embeddings from inputs."""
 
-    def check_params(self):
-        if self.loss not in ALL_LOSSES:
-            raise ValueError(f"`loss` must be one of {ALL_LOSSES}, got {self.loss}")
-
     @override
     def compute_loss(
         self,
