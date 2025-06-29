@@ -39,6 +39,23 @@ class DynEmbedBase(TorchEmbedBase):
         Number of training epochs.
     lr : float
         Learning rate for the optimizer.
+    lr_scheduler : {'step', 'exponential', 'cosine', 'plateau'} or None, default: None
+        Learning rate scheduler to use during training.
+
+        - ``'step'`` reduces LR by a factor every step_size epochs.
+        - ``'exponential'`` decays LR exponentially every epoch.
+        - ``'cosine'`` uses cosine annealing schedule.
+        - ``'plateau'`` reduces LR when validation loss plateaus.
+
+    lr_scheduler_config : dict or None, default: None
+        Configuration dictionary for learning rate scheduler parameters.
+        The required parameters depend on the scheduler type:
+
+        - For ``'step'``: {'step_size': int, 'gamma': float}
+        - For ``'exponential'``: {'gamma': float}
+        - For ``'cosine'``: {'T_max': int, 'eta_min': float}
+        - For ``'plateau'``: {'factor': float, 'patience': int}
+
     weight_decay : float
         Weight decay (L2 regularization) for the optimizer.
     batch_size : int
@@ -97,6 +114,8 @@ class DynEmbedBase(TorchEmbedBase):
         norm_embed: bool,
         n_epochs: int,
         lr: float,
+        lr_scheduler: str | None,
+        lr_scheduler_config: dict[str, Any] | None,
         weight_decay: float,
         batch_size: int,
         sampler: str,
@@ -118,6 +137,8 @@ class DynEmbedBase(TorchEmbedBase):
             norm_embed,
             n_epochs,
             lr,
+            lr_scheduler,
+            lr_scheduler_config,
             weight_decay,
             batch_size,
             sampler,

@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 from lightning import Callback, seed_everything
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from torch import optim
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 
@@ -66,6 +67,23 @@ class TorchBase(L.LightningModule):
         Number of training epochs.
     lr : float
         Learning rate for the optimizer.
+    lr_scheduler : {'step', 'exponential', 'cosine', 'plateau'} or None, default: None
+        Learning rate scheduler to use during training.
+
+        - ``'step'`` reduces LR by a factor every step_size epochs.
+        - ``'exponential'`` decays LR exponentially every epoch.
+        - ``'cosine'`` uses cosine annealing schedule.
+        - ``'plateau'`` reduces LR when validation loss plateaus.
+
+    lr_scheduler_config : dict or None, default: None
+        Configuration dictionary for learning rate scheduler parameters.
+        The required parameters depend on the scheduler type:
+
+        - For ``'step'``: {'step_size': int, 'gamma': float}
+        - For ``'exponential'``: {'gamma': float}
+        - For ``'cosine'``: {'T_max': int, 'eta_min': float}
+        - For ``'plateau'``: {'factor': float, 'patience': int}
+
     weight_decay : float
         Weight decay (L2 regularization) for the optimizer.
     batch_size : int
@@ -121,6 +139,8 @@ class TorchBase(L.LightningModule):
         embed_size: int,
         n_epochs: int,
         lr: float,
+        lr_scheduler: str | None,
+        lr_scheduler_config: dict[str, Any] | None,
         weight_decay: float,
         batch_size: int,
         sampler: str,
@@ -139,6 +159,8 @@ class TorchBase(L.LightningModule):
         self.embed_size = embed_size
         self.n_epochs = n_epochs
         self.lr = lr
+        self.lr_scheduler = lr_scheduler
+        self.lr_scheduler_config = lr_scheduler_config
         self.wd = weight_decay
         self.batch_size = batch_size
         self.sampler = sampler
@@ -474,9 +496,94 @@ class TorchBase(L.LightningModule):
         if self.evaluator and self.evaluator.verbose >= 1:
             self.evaluator.log_metrics(self.current_epoch)
 
+    @staticmethod
+    def check_lr_scheduler_config(lr_scheduler: str, lr_scheduler_config: dict[str, Any]) -> dict[str, Any]:
+        if lr_scheduler == "step":
+            if "step_size" not in lr_scheduler_config:
+                raise ValueError("step_size is required for StepLR scheduler.")
+            elif "gamma" not in lr_scheduler_config:
+                raise ValueError("gamma is required for StepLR scheduler.")
+            return {
+                "step_size": lr_scheduler_config["step_size"],
+                "gamma": lr_scheduler_config["gamma"]
+            }
+        elif lr_scheduler == "exponential":
+            if "gamma" not in lr_scheduler_config:
+                raise ValueError("gamma is required for ExponentialLR scheduler.")
+            return {"gamma": lr_scheduler_config["gamma"]}
+        elif lr_scheduler == "cosine":
+            if "T_max" not in lr_scheduler_config:
+                raise ValueError("T_max is required for CosineAnnealingLR scheduler.")
+            elif "eta_min" not in lr_scheduler_config:
+                raise ValueError("eta_min is required for CosineAnnealingLR scheduler.")
+            return {
+                "T_max": lr_scheduler_config["T_max"],
+                "eta_min": lr_scheduler_config["eta_min"]
+            }
+        elif lr_scheduler == "plateau":
+            if "factor" not in lr_scheduler_config:
+                raise ValueError("factor is required for ReduceLROnPlateau scheduler.")
+            elif "patience" not in lr_scheduler_config:
+                raise ValueError("patience is required for ReduceLROnPlateau scheduler.")
+            return {
+                "factor": lr_scheduler_config["factor"],
+                "patience": lr_scheduler_config["patience"]
+            }
+        else:
+            raise ValueError(f"Unsupported lr_scheduler: {lr_scheduler}. "
+                             f"Supported options: 'step', 'exponential', 'cosine', 'plateau'")
+
     @override
-    def configure_optimizers(self) -> optim.Optimizer:
-        return optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.wd)
+    def configure_optimizers(self) -> optim.Optimizer | OptimizerLRSchedulerConfig:
+        optimizer = optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.wd)
+        
+        if self.lr_scheduler is None:
+            return optimizer
+        if self.lr_scheduler_config is None:
+            raise ValueError(
+                "lr_scheduler_config is required when using a learning rate scheduler."
+            )
+
+        configs = self.check_lr_scheduler_config(
+            self.lr_scheduler, self.lr_scheduler_config
+        )
+
+        if self.lr_scheduler == "step":
+            lr_scheduler = optim.lr_scheduler.StepLR(optimizer, **configs)
+        elif self.lr_scheduler == "exponential":
+            lr_scheduler = optim.lr_scheduler.ExponentialLR(optimizer, **configs)
+        elif self.lr_scheduler == "cosine":
+            lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, **configs)
+        elif self.lr_scheduler == "plateau":
+            lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, **configs)
+        else:
+            raise ValueError(
+                f"Unsupported lr_scheduler: {self.lr_scheduler}. "
+                f"Supported options: 'step', 'exponential', 'cosine', 'plateau'"
+            )
+
+        lr_scheduler_config = {
+            "scheduler": lr_scheduler,
+            # The unit of the scheduler's step size, could also be 'step'.
+            # 'epoch' updates the scheduler on epoch end whereas 'step'
+            # updates it after an optimizer update.
+            "interval": "epoch",
+            # How many epochs/steps should pass between calls to
+            # `scheduler.step()`. 1 corresponds to updating the learning
+            # rate after every epoch/step.
+            "frequency": 1,
+            # Metric to monitor for schedulers like `ReduceLROnPlateau`
+            "monitor": "val_loss",
+            # If set to `True`, will enforce that the value specified 'monitor'
+            # is available when the scheduler is updated, thus stopping
+            # training if not found. If set to `False`, it will only produce a warning
+            "strict": True,
+            # If using the `LearningRateMonitor` callback to monitor the
+            # learning rate progress, this keyword can be used to specify
+            # a custom logged name
+            "name": None,
+        }
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
 
     def compute_loss(self, batch: MutableMapping[str, torch.Tensor]) -> torch.Tensor:
         """Compute the loss for a batch of data."""
