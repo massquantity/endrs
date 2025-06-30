@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 import torch
 from torch import nn
@@ -32,6 +33,23 @@ class TwoTower(DynEmbedBase):
         Number of training epochs.
     lr : float, default: 0.001
         Learning rate for the optimizer.
+    lr_scheduler : {'step', 'exponential', 'cosine', 'plateau'} or None, default: None
+        Learning rate scheduler to use during training.
+
+        - ``'step'`` reduces LR by a factor every step_size epochs.
+        - ``'exponential'`` decays LR exponentially every epoch.
+        - ``'cosine'`` uses cosine annealing schedule.
+        - ``'plateau'`` reduces LR when validation loss plateaus.
+
+    lr_scheduler_config : dict or None, default: None
+        Configuration dictionary for learning rate scheduler parameters.
+        The required parameters depend on the scheduler type.
+
+        - For ``'step'``: {'step_size': int, 'gamma': float}
+        - For ``'exponential'``: {'gamma': float}
+        - For ``'cosine'``: {'T_max': int, 'eta_min': float}
+        - For ``'plateau'``: {'factor': float, 'patience': int}
+
     weight_decay : float, default: 0.0
         Weight decay (L2 regularization) for the optimizer.
     batch_size : int, default: 256
@@ -89,6 +107,8 @@ class TwoTower(DynEmbedBase):
         norm_embed: bool = False,
         n_epochs: int = 20,
         lr: float = 0.001,
+        lr_scheduler: str | None = None,
+        lr_scheduler_config: dict[str, Any] | None = None,
         weight_decay: float = 0.0,
         batch_size: int = 256,
         sampler: str = "random",
@@ -113,6 +133,8 @@ class TwoTower(DynEmbedBase):
             norm_embed,
             n_epochs,
             lr,
+            lr_scheduler,
+            lr_scheduler_config,
             weight_decay,
             batch_size,
             sampler,
