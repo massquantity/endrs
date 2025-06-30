@@ -15,10 +15,12 @@ from endrs.types import ItemId, UserId
 class DPP:
     """Determinantal Point Process (DPP) for diverse recommendation.
 
-    DPP is a probabilistic model that promotes diversity in recommendation lists
-    by considering both item relevance and diversity. It uses a two-tower model
-    for initial ranking and then reranks items using DPP to balance relevance
-    and diversity.
+    To generate diverse recommendations, the model first retrieves candidate
+    items from a two-tower model. It then constructs a kernel matrix from the
+    item embeddings of these candidates to capture both quality and similarity.
+    Finally, a Determinantal Point Process (DPP) is used to sample a diverse
+    subset of items from this matrix, balancing relevance and diversity in the
+    final recommendation list.
 
     Parameters
     ----------
