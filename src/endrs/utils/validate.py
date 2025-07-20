@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -197,3 +198,77 @@ def check_feat_cols(
             raise ValueError(f"`{user_col_name}` should not be included in `{col}`")
         if feat and item_col_name in feat:
             raise ValueError(f"`{item_col_name}` should not be included in `{col}`")
+
+
+def check_lr_scheduler_config(
+    lr_scheduler: str, lr_scheduler_config: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate and extract required parameters for learning rate schedulers.
+
+    Parameters
+    ----------
+    lr_scheduler : str
+        The type of learning rate scheduler. Supported options are:
+        - 'step': StepLR scheduler
+        - 'exponential': ExponentialLR scheduler
+        - 'cosine': CosineAnnealingLR scheduler
+        - 'plateau': ReduceLROnPlateau scheduler
+    lr_scheduler_config : dict[str, Any]
+        Configuration dictionary containing scheduler-specific parameters.
+        Required parameters vary by scheduler type:
+
+        - For 'step': 'step_size' (int) and 'gamma' (float)
+        - For 'exponential': 'gamma' (float)
+        - For 'cosine': 'T_max' (int) and 'eta_min' (float)
+        - For 'plateau': 'factor' (float) and 'patience' (int)
+
+    Returns
+    -------
+    dict[str, Any]
+        A dictionary containing only the validated required parameters for the
+        specified scheduler type.
+
+    Raises
+    ------
+    ValueError
+        If the lr_scheduler type is not supported or if required parameters
+        are missing from lr_scheduler_config for the specified scheduler type.
+    """
+    if lr_scheduler == "step":
+        if "step_size" not in lr_scheduler_config:
+            raise ValueError("step_size is required for StepLR scheduler.")
+        elif "gamma" not in lr_scheduler_config:
+            raise ValueError("gamma is required for StepLR scheduler.")
+        return {
+            "step_size": lr_scheduler_config["step_size"],
+            "gamma": lr_scheduler_config["gamma"]
+        }
+
+    elif lr_scheduler == "exponential":
+        if "gamma" not in lr_scheduler_config:
+            raise ValueError("gamma is required for ExponentialLR scheduler.")
+        return {"gamma": lr_scheduler_config["gamma"]}
+
+    elif lr_scheduler == "cosine":
+        if "T_max" not in lr_scheduler_config:
+            raise ValueError("T_max is required for CosineAnnealingLR scheduler.")
+        elif "eta_min" not in lr_scheduler_config:
+            raise ValueError("eta_min is required for CosineAnnealingLR scheduler.")
+        return {
+            "T_max": lr_scheduler_config["T_max"],
+            "eta_min": lr_scheduler_config["eta_min"]
+        }
+
+    elif lr_scheduler == "plateau":
+        if "factor" not in lr_scheduler_config:
+            raise ValueError("factor is required for ReduceLROnPlateau scheduler.")
+        elif "patience" not in lr_scheduler_config:
+            raise ValueError("patience is required for ReduceLROnPlateau scheduler.")
+        return {
+            "factor": lr_scheduler_config["factor"],
+            "patience": lr_scheduler_config["patience"]
+        }
+
+    else:
+        raise ValueError(f"Unsupported lr_scheduler: {lr_scheduler}. "
+                         f"Supported options: 'step', 'exponential', 'cosine', 'plateau'")

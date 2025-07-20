@@ -45,7 +45,11 @@ from endrs.types import ItemId, UserId
 from endrs.utils.constants import LABEL_KEY, LISTWISE_LOSS, OOV_IDX, PAIRWISE_LOSS
 from endrs.utils.logger import is_logger_ready, logger, normal_log
 from endrs.utils.misc import LightningProgressBar
-from endrs.utils.validate import check_labels, check_multi_labels
+from endrs.utils.validate import (
+    check_labels,
+    check_lr_scheduler_config,
+    check_multi_labels,
+)
 
 
 class TorchBase(L.LightningModule):
@@ -224,7 +228,7 @@ class TorchBase(L.LightningModule):
             - ``verbose <= 0``: Print nothing.
             - ``verbose >= 1`` : Print evaluation metrics if ``eval_data`` is provided.
             - ``verbose >= 2`` : Enable progress bar.
-            - ``verbose >= 2`` : Print model summary.
+            - ``verbose >= 3`` : Print model summary.
 
         shuffle : bool, default: True
             Whether to shuffle the training data.
@@ -285,6 +289,7 @@ class TorchBase(L.LightningModule):
         else:
             val_combined_dataloader = None
 
+        self.verbose = verbose
         enable_pbar = True if verbose >= 2 else False
         leave = True if verbose >= 3 else False
         enable_model_summary = True if verbose >= 3 else False
@@ -316,7 +321,7 @@ class TorchBase(L.LightningModule):
         )
 
         if enable_early_stopping and callbacks:
-            self.load_best_model(callbacks, verbose)
+            self.load_best_model(callbacks)
 
     def get_callbacks(
         self,
@@ -364,7 +369,7 @@ class TorchBase(L.LightningModule):
 
         return callbacks
 
-    def load_best_model(self, callbacks: list[Callback], verbose: int):
+    def load_best_model(self, callbacks: list[Callback]):
         checkpoint_callback = None
         for callback in callbacks:
             if isinstance(callback, ModelCheckpoint):
@@ -379,7 +384,7 @@ class TorchBase(L.LightningModule):
         with torch.inference_mode():
             self.load_state_dict(checkpoint["state_dict"])
 
-        if verbose > 0:
+        if self.verbose > 0:
             normal_log(f"Early stopping triggered. Best model loaded from {best_model_path}")
 
     def evaluate(
@@ -445,10 +450,9 @@ class TorchBase(L.LightningModule):
 
     @override
     def on_train_start(self):
-        if self.evaluator:
-            if is_logger_ready():
-                cur_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logger.bind(task="metrics_file").info(f"start time: {cur_time}\n")
+        if self.evaluator and is_logger_ready():
+            cur_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.bind(task="metrics_file").info(f"start time: {cur_time}\n")
 
     @override
     def on_train_end(self):
@@ -496,42 +500,9 @@ class TorchBase(L.LightningModule):
         if self.evaluator and self.evaluator.verbose >= 1:
             self.evaluator.log_metrics(self.current_epoch)
 
-    @staticmethod
-    def check_lr_scheduler_config(lr_scheduler: str, lr_scheduler_config: dict[str, Any]) -> dict[str, Any]:
-        if lr_scheduler == "step":
-            if "step_size" not in lr_scheduler_config:
-                raise ValueError("step_size is required for StepLR scheduler.")
-            elif "gamma" not in lr_scheduler_config:
-                raise ValueError("gamma is required for StepLR scheduler.")
-            return {
-                "step_size": lr_scheduler_config["step_size"],
-                "gamma": lr_scheduler_config["gamma"]
-            }
-        elif lr_scheduler == "exponential":
-            if "gamma" not in lr_scheduler_config:
-                raise ValueError("gamma is required for ExponentialLR scheduler.")
-            return {"gamma": lr_scheduler_config["gamma"]}
-        elif lr_scheduler == "cosine":
-            if "T_max" not in lr_scheduler_config:
-                raise ValueError("T_max is required for CosineAnnealingLR scheduler.")
-            elif "eta_min" not in lr_scheduler_config:
-                raise ValueError("eta_min is required for CosineAnnealingLR scheduler.")
-            return {
-                "T_max": lr_scheduler_config["T_max"],
-                "eta_min": lr_scheduler_config["eta_min"]
-            }
-        elif lr_scheduler == "plateau":
-            if "factor" not in lr_scheduler_config:
-                raise ValueError("factor is required for ReduceLROnPlateau scheduler.")
-            elif "patience" not in lr_scheduler_config:
-                raise ValueError("patience is required for ReduceLROnPlateau scheduler.")
-            return {
-                "factor": lr_scheduler_config["factor"],
-                "patience": lr_scheduler_config["patience"]
-            }
-        else:
-            raise ValueError(f"Unsupported lr_scheduler: {lr_scheduler}. "
-                             f"Supported options: 'step', 'exponential', 'cosine', 'plateau'")
+        if self.lr_scheduler is not None and self.verbose >= 1:
+            current_lr = self.lr_schedulers().get_last_lr()[0]
+            normal_log(f"Epoch {self.current_epoch}: Learning Rate = {current_lr:.6f}")
 
     @override
     def configure_optimizers(self) -> optim.Optimizer | OptimizerLRSchedulerConfig:
@@ -544,9 +515,7 @@ class TorchBase(L.LightningModule):
                 "lr_scheduler_config is required when using a learning rate scheduler."
             )
 
-        configs = self.check_lr_scheduler_config(
-            self.lr_scheduler, self.lr_scheduler_config
-        )
+        configs = check_lr_scheduler_config(self.lr_scheduler, self.lr_scheduler_config)
 
         if self.lr_scheduler == "step":
             lr_scheduler = optim.lr_scheduler.StepLR(optimizer, **configs)
