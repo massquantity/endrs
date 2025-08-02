@@ -23,6 +23,9 @@ dependencies = [
 ]
 
 [tool.maturin]
+# exclude `extension-module` in rust testing, only used in maturin build
+# https://pyo3.rs/v0.23.5/faq.html#i-cant-run-cargo-test-or-i-cant-build-in-a-cargo-workspace-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
+features = ["pyo3/extension-module", "pyo3/abi3-py312"]
 module-name = "endrs_ext"
 manifest-path = "rust/Cargo.toml"
 python-source = "src"
