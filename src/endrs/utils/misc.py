@@ -1,8 +1,13 @@
+import time
+from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, override
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import TQDMProgressBar
 from tqdm import tqdm
+
+from endrs.utils.logger import normal_log
 
 
 class LightningProgressBar(TQDMProgressBar):
@@ -121,3 +126,26 @@ def colorize(text: str, color: str, bold: bool = False, highlight: bool = False)
 
     attrs_string = ";".join(attrs)
     return f"\x1b[{attrs_string}m{text}\x1b[0m"
+
+
+def show_start_time():
+    start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    color_time = colorize(start_time, "magenta")
+    normal_log(f"Training start time: {color_time}")
+
+
+@contextmanager
+def time_block(block_name: str, verbose: int = 1):
+    if verbose <= 0:
+        yield
+        return
+
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        # Always calculate elapsed time in finally block
+        # This ensures timing even if an exception occurs
+        end = time.perf_counter()
+        elapsed = end - start
+        normal_log(f"{block_name} elapsed: {elapsed:.3f}s")
