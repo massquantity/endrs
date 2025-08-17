@@ -225,7 +225,7 @@ class TorchBase(L.LightningModule):
         verbose : int, default: 2
             Verbosity level (0=quiet, 1=epoch results, 2=progress bar, 3=detailed).
 
-            - ``verbose <= 0``: Print nothing.
+            - ``verbose <= 0`` : Print nothing.
             - ``verbose >= 1`` : Print evaluation metrics if ``eval_data`` is provided.
             - ``verbose >= 2`` : Enable progress bar.
             - ``verbose >= 3`` : Print model summary.

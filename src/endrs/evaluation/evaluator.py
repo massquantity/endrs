@@ -136,6 +136,7 @@ class Evaluator:
         """
         if not isinstance(data, (pd.DataFrame, EvalBatchData)):
             raise ValueError("`data` must be `pandas.DataFrame` or `EvalBatchData`")
+
         if isinstance(data, pd.DataFrame):
             user_col = self.data_info.user_col_name
             item_col = self.data_info.item_col_name
@@ -154,10 +155,11 @@ class Evaluator:
             data.check_labels(self.is_multi_task, self.task, self.neg_sampling)
 
         if self.neg_sampling and not data.has_sampled:
+            num_neg = getattr(self.model, "num_neg", None) or 1
             data.build_negatives(
                 self.n_items,
-                self.model.num_neg,
-                self.model.cand_items,
+                num_neg,
+                self.model.data_info.candidate_items,
                 self.seed,
             )
         return data
@@ -187,6 +189,7 @@ class Evaluator:
                 collate_fn=lambda batch: (batch.users, batch.items),
                 num_workers=self.num_workers,
             )
+
         if self.need_recos:
             users = self.sample_users()
             num_batch_users = max(1, math.floor(self.eval_batch_size / self.n_items))
@@ -197,6 +200,7 @@ class Evaluator:
                 collate_fn=lambda x: x,
                 num_workers=self.num_workers,
             )
+
         return CombinedLoader([val_loader, pred_loader, reco_loader], mode="sequential")
 
     def update_preds(self, batch: tuple[np.ndarray, np.ndarray]):
