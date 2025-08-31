@@ -7,7 +7,7 @@ use crate::graph::Graph;
 use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
 use crate::serialization::{load_model, save_model};
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{create_thread_pool, DEFAULT_PRED};
+use crate::utils::{create_thread_pool, DEFAULT_PRED, OOV_IDX};
 
 #[pyclass(module = "endrs_ext", name = "Swing")]
 #[derive(Serialize, Deserialize)]
@@ -29,11 +29,13 @@ impl PySwing {
     #[setter]
     fn set_n_users(&mut self, n_users: usize) {
         self.n_users = n_users;
+        self.graph.n_users = n_users;
     }
 
     #[setter]
     fn set_n_items(&mut self, n_items: usize) {
         self.n_items = n_items;
+        self.graph.n_items = n_items;
     }
 
     #[setter]
@@ -110,12 +112,12 @@ impl PySwing {
         self.user_interactions = CsrMatrix::merge(
             &self.user_interactions,
             &new_user_interactions,
-            Some(self.n_users),
+            Some(self.n_users + 1),
         );
         self.item_interactions = CsrMatrix::merge(
             &self.item_interactions,
             &new_item_interactions,
-            Some(self.n_items),
+            Some(self.n_items + 1),
         );
         Ok(())
     }
@@ -142,7 +144,7 @@ impl PySwing {
         let items: Vec<i32> = items.extract()?;
 
         for (&u, &i) in users.iter().zip(items.iter()) {
-            if u == self.n_users || usize::try_from(i)? == self.n_items {
+            if u == OOV_IDX || usize::try_from(i)? == OOV_IDX {
                 preds.push(DEFAULT_PRED);
                 continue;
             }
@@ -152,7 +154,7 @@ impl PySwing {
                 get_row(&self.user_interactions, u, false),
             ) {
                 (Some(item_swings), Some(item_labels)) => {
-                    let num = std::cmp::min(self.top_k, item_swings.len());
+                    let num = self.top_k.min(item_swings.len());
                     let mut item_swing_scores = vec![(0, 0.0); num];
                     item_swing_scores.clone_from_slice(&item_swings[..num]);
                     item_swing_scores.sort_unstable_by_key(|&(i, _)| i);
@@ -201,7 +203,7 @@ impl PySwing {
                         let mut item_scores: FxHashMap<i32, f32> = FxHashMap::default();
                         for (i, i_label) in row {
                             if let Some(item_swings) = self.swing_score_mapping.get(&i) {
-                                let num = std::cmp::min(self.top_k, item_swings.len());
+                                let num = self.top_k.min(item_swings.len());
                                 for &(j, i_j_swing_score) in &item_swings[..num] {
                                     if filter_consumed && consumed.contains(&j) {
                                         continue;

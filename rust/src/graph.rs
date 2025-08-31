@@ -13,8 +13,8 @@ type ScoredItems = Vec<(i32, f32)>;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Graph {
-    n_users: usize,
-    n_items: usize,
+    pub(crate) n_users: usize,
+    pub(crate) n_items: usize,
     alpha: f32,
     max_cache_num: usize,
 }
