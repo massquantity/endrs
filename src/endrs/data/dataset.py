@@ -1,6 +1,7 @@
 import functools
 import itertools
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,10 @@ from endrs.types import ItemId
 from endrs.utils.constants import ITEM_KEY, OOV_IDX, USER_KEY
 from endrs.utils.hashing import Hasher
 from endrs.utils.validate import check_data_cols, check_feat_cols
+
+if TYPE_CHECKING:
+    from endrs.algorithms.swing import Swing
+    from endrs.bases.torch_base import TorchBase
 
 
 class Dataset:
@@ -72,6 +77,7 @@ class Dataset:
         user_unique_vals = np.sort(train_data[self.user_col_name].unique())
         item_unique_vals = np.sort(train_data[self.item_col_name].unique())
         self.id_converter = self._build_id_converter(user_unique_vals, item_unique_vals)
+
         batch_fn = functools.partial(
             self.build_batch,
             user_col_name=self.user_col_name,
@@ -80,6 +86,7 @@ class Dataset:
             multi_label_col_names=self.multi_label_col_names,
             id_converter=self.id_converter,
         )
+
         self.train_data = batch_fn(train_data, is_train=True)
         if eval_data is not None:
             self.eval_data = batch_fn(eval_data, is_train=False)
@@ -113,12 +120,14 @@ class Dataset:
     ) -> BatchData | EvalBatchData:
         user_indices = data[user_col_name].map(id_converter.safe_user_to_id).tolist()
         item_indices = data[item_col_name].map(id_converter.safe_item_to_id).tolist()
+
         labels, multi_labels = None, None
         if label_col_name:
             labels = data[label_col_name].astype("float32").tolist()
         if multi_label_col_names:
             multi_labels = data[multi_label_col_names].astype("float32")
             multi_labels = multi_labels.to_numpy().tolist()
+
         if is_train:
             return BatchData(user_indices, item_indices, labels, multi_labels)
         else:
@@ -374,6 +383,183 @@ class Dataset:
             feat_unique[col] = np.array([oov, *data], dtype=np.float32)
         return feat_unique
 
+    @classmethod
+    def for_retrain(
+        cls,
+        user_col_name: str,
+        item_col_name: str,
+        label_col_name: str | None = None,
+        multi_label_col_names: Sequence[str] | None = None,
+        shuffle: bool = False,
+        pop_num: int = 100,
+        seed: int = 42,
+        *,
+        model: "TorchBase | Swing",
+    ) -> "HashDataset | ExtendableDataset":
+        """Create a dataset for retraining from an existing model.
+        
+        This factory method creates the appropriate dataset type based on the model
+        architecture and data representation requirements:
+        - TorchBase models with hash-based data → HashDataset
+        - Swing models without hash-based data → ExtendableDataset
+
+        Parameters
+        ----------
+        user_col_name : str
+            Name of the user column in the data
+        item_col_name : str
+            Name of the item column in the data
+        label_col_name : str or None, default: None
+            Name of the label column in the data
+        multi_label_col_names : Sequence[str] or None, default: None
+            Names of multi-label columns in the data
+        shuffle : bool, default: False
+            Whether to shuffle the data
+        pop_num : int, default: 100
+            Number of popular items to consider
+        seed : int, default: 42
+            Random seed for reproducibility
+        model : TorchBase or Swing
+            Existing trained model to create retraining dataset from
+
+        Returns
+        -------
+        HashDataset or ExtendableDataset
+            Dataset instance appropriate for the model type
+        """
+        from endrs.algorithms.swing import Swing
+        from endrs.bases.torch_base import TorchBase
+
+        if not isinstance(model, (TorchBase, Swing)):
+            raise TypeError(
+                f"Model must be a subclass of TorchBase or Swing, got {type(model).__name__}"
+            )
+
+        if isinstance(model, TorchBase):
+            if not model.data_info.use_hash:
+                raise ValueError(
+                    "TorchBase model must use hash-based data representation for retraining."
+                )
+            return HashDataset(
+                user_col_name=user_col_name,
+                item_col_name=item_col_name,
+                label_col_name=label_col_name,
+                multi_label_col_names=multi_label_col_names,
+                shuffle=shuffle,
+                pop_num=pop_num,
+                seed=seed,
+                n_hash_bins=model.data_info.n_hash_bins,
+                retrain=True,
+            )
+
+        if isinstance(model, Swing):
+            if model.data_info.use_hash:
+                raise ValueError(
+                    "Swing model cannot use hash-based data representation for retraining."
+                )
+            return ExtendableDataset(
+                model=model,
+                user_col_name=user_col_name,
+                item_col_name=item_col_name,
+                label_col_name=label_col_name,
+                multi_label_col_names=multi_label_col_names,
+                shuffle=shuffle,
+                pop_num=pop_num,
+                seed=seed,
+            )
+
+
+class ExtendableDataset(Dataset):
+    """Dataset that can extend entity mappings from existing models for incremental training.
+
+    This dataset class can take an existing model and extend its entity mappings
+    with new users and items found in the new training data.
+    """
+    
+    def __init__(
+        self,
+        model: "Swing",
+        user_col_name: str,
+        item_col_name: str,
+        label_col_name: str | None = None,
+        multi_label_col_names: Sequence[str] | None = None,
+        shuffle: bool = False,
+        pop_num: int = 100,
+        seed: int = 42,
+    ):
+        super().__init__(
+            user_col_name,
+            item_col_name,
+            label_col_name,
+            multi_label_col_names,
+            shuffle,
+            pop_num,
+            seed,
+        )
+        self.model = model
+
+    def build_data(
+        self,
+        train_data: pd.DataFrame,
+        eval_data: pd.DataFrame | None = None,
+        test_data: pd.DataFrame | None = None,
+    ):
+        super().build_data(train_data, eval_data, test_data)
+        user_consumed, item_consumed = self._merge_consumed_data()
+        self.data_info.user_consumed = user_consumed
+        self.data_info.item_consumed = item_consumed
+        self.model.update_data_info(self.data_info)
+
+    def _build_id_converter(
+        self, new_user_vals: np.ndarray, new_item_vals: np.ndarray
+    ) -> IdConverter:
+        """Extend existing ID converter with new users and items."""
+        existing_converter = self.model.data_info.id_converter
+        existing_users = np.array(list(existing_converter.user2id.keys()))
+        existing_items = np.array(list(existing_converter.item2id.keys()))
+        new_users = np.setdiff1d(new_user_vals, existing_users)
+        new_items = np.setdiff1d(new_item_vals, existing_items)
+        max_user_id = max(existing_converter.user2id.values())
+        max_item_id = max(existing_converter.item2id.values())
+
+        new_user2id = {}
+        new_id2user = {}
+        for i, user in enumerate(new_users, start=max_user_id + 1):
+            new_user2id[user] = i
+            new_id2user[i] = user
+            
+        new_item2id = {}
+        new_id2item = {}
+        for i, item in enumerate(new_items, start=max_item_id + 1):
+            new_item2id[item] = i
+            new_id2item[i] = item
+        
+        existing_converter.update(new_user2id, new_item2id, new_id2user, new_id2item)
+        return existing_converter
+
+    def _merge_consumed_data(self) -> tuple[dict, dict]:
+        """Merge new consumed data with existing consumed data."""
+        existing_user_consumed = self.model.data_info.user_consumed
+        existing_item_consumed = self.model.data_info.item_consumed
+        new_user_consumed = self.data_info.user_consumed
+        new_item_consumed = self.data_info.item_consumed
+
+        merged_user_consumed = dict(existing_user_consumed)
+        for user_id, items in new_user_consumed.items():
+            if user_id in merged_user_consumed:
+                merged_user_consumed[user_id].extend(items)
+            else:
+                merged_user_consumed[user_id] = list(items)
+        
+        merged_item_consumed = dict(existing_item_consumed)
+        for item_id, users in new_item_consumed.items():
+            if item_id in merged_item_consumed:
+                merged_item_consumed[item_id].extend(users)
+            else:
+                merged_item_consumed[item_id] = list(users)
+        
+        return merged_user_consumed, merged_item_consumed
+
 
 class HashDataset(Dataset):
     def __init__(
@@ -432,7 +618,7 @@ class HashDataset(Dataset):
     def _build_feat_unique(
         self, feat_data: pd.DataFrame, sparse_cols: Sequence[str], name: str
     ):
-        col_name = self.user_col_name if name.endswith("user") else self.item_col_name
+        col_name = self.user_col_name if name == "user" else self.item_col_name
         feat_data = self._map_ids(feat_data, name)
         ids = feat_data[col_name].to_numpy()
         for col in sparse_cols:
@@ -442,6 +628,7 @@ class HashDataset(Dataset):
                 all_hash_data = self.feat_unique[col]
             else:
                 all_hash_data = np.full(self.n_hash_bins + 1, OOV_IDX)
+
             all_hash_data[ids] = data
             self.feat_unique[col] = all_hash_data
 
