@@ -36,7 +36,7 @@ impl Graph {
         item_interactions: &CsrMatrix<i32, f32>,
         prev_scores: &FxHashMap<i32, ScoredItems>,
         user_weights: &[f32],
-        cached_common_items: Arc<DashMap<usize, Vec<usize>>>,
+        cached_common_items: Arc<DashMap<u64, Vec<usize>>>,
     ) -> (i32, ScoredItems) {
         let target_i32 = target_item as i32;
         let users = get_row_vec(item_interactions, target_item);
@@ -51,7 +51,7 @@ impl Graph {
         let mut item_scores = init_item_scores(target_i32, self.n_items, prev_scores);
         for (j, &u) in users.iter().enumerate() {
             for &v in &users[(j + 1)..users.len()] {
-                let key = u * self.n_users + v;
+                let key = (u as u64) * (self.n_users as u64) + (v as u64);
                 let common_items = match cached_common_items.get(&key) {
                     Some(items) => items.to_owned(),
                     None => {
@@ -87,7 +87,7 @@ impl Graph {
         prev_mapping: &FxHashMap<i32, ScoredItems>,
     ) -> PyResult<FxHashMap<i32, ScoredItems>> {
         let user_weights = compute_user_weights(user_interactions, self.n_users);
-        let cached_common_items = Arc::new(DashMap::new());
+        let cached_common_items: Arc<DashMap<u64, Vec<usize>>> = Arc::new(DashMap::new());
         let swing_scores: Vec<(i32, ScoredItems)> = (1..=self.n_items)
             .into_par_iter()
             .map(|i| {
