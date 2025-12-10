@@ -48,7 +48,7 @@ class FeatInfo:
         user_multi_sparse_feats: Sequence[Sequence[str]] | None = None,
         item_multi_sparse_feats: Sequence[Sequence[str]] | None = None,
         feat_unique: Mapping[str, np.ndarray] | None = None,
-        sparse_val_to_idx: Mapping[str, Mapping[Any, int]] = None,
+        sparse_val_to_idx: Mapping[str, Mapping[Any, int]] | None = None,
     ):
         self.user_sparse_feats = user_sparse_feats or []
         self.item_sparse_feats = item_sparse_feats or []

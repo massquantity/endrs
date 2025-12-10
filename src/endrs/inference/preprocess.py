@@ -3,7 +3,7 @@ import torch
 
 from endrs.data.data_info import IdConverter
 from endrs.feature.feat_info import FeatInfo
-from endrs.types import UserId
+from endrs.types import ItemId, UserId
 from endrs.utils.constants import ITEM_KEY, OOV_IDX, SEQ_KEY, USER_KEY
 from endrs.utils.misc import colorize
 
@@ -102,7 +102,7 @@ def get_seq_inputs(
 
 def convert_ids(
     user: UserId | list[UserId] | np.ndarray,
-    item: UserId | list[UserId] | np.ndarray,
+    item: ItemId | list[ItemId] | np.ndarray,
     id_converter: IdConverter,
     inner_id: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
