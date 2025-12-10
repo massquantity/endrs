@@ -900,3 +900,22 @@ class TorchBase(L.LightningModule):
     def on_load_checkpoint(self, checkpoint: dict[str, Any]):
         if "default_recs" in checkpoint:
             self.default_recs = checkpoint["default_recs"]
+
+    def update_data_info(self, data_info: DataInfo):
+        """Update the model's data information for incremental training.
+
+        Parameters
+        ----------
+        data_info : DataInfo
+            New data information containing updated user/item mappings and consumed data.
+        """
+        self.data_info = data_info
+        self.n_users = data_info.n_users
+        self.n_items = data_info.n_items
+        self.user_consumed = data_info.user_consumed
+        self.id_converter = data_info.id_converter
+        self.cand_users = data_info.candidate_users
+        self.cand_items = data_info.candidate_items
+        self.ranking_model = Ranking(
+            self.task, self.user_consumed, self.np_rng, self.cand_items
+        )

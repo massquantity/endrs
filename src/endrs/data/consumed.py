@@ -105,3 +105,44 @@ def _remove_duplicates(
     user_dedup = {u: list(dict_func(items)) for u, items in user_consumed.items()}
     item_dedup = {i: list(dict_func(users)) for i, users in item_consumed.items()}
     return user_dedup, item_dedup
+
+
+def merge_consumed_data(
+    existing_user_consumed: dict[int, list[int]],
+    existing_item_consumed: dict[int, list[int]],
+    new_user_consumed: dict[int, list[int]],
+    new_item_consumed: dict[int, list[int]],
+) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
+    """Merge new consumed data with existing consumed data.
+
+    Parameters
+    ----------
+    existing_user_consumed : dict[int, list[int]]
+        Existing mapping of user IDs to consumed item IDs.
+    existing_item_consumed : dict[int, list[int]]
+        Existing mapping of item IDs to consuming user IDs.
+    new_user_consumed : dict[int, list[int]]
+        New mapping of user IDs to consumed item IDs.
+    new_item_consumed : dict[int, list[int]]
+        New mapping of item IDs to consuming user IDs.
+
+    Returns
+    -------
+    tuple[dict[int, list[int]], dict[int, list[int]]]
+        Merged user_consumed and item_consumed dictionaries.
+    """
+    merged_user_consumed = dict(existing_user_consumed)
+    for user_id, items in new_user_consumed.items():
+        if user_id in merged_user_consumed:
+            merged_user_consumed[user_id].extend(items)
+        else:
+            merged_user_consumed[user_id] = list(items)
+
+    merged_item_consumed = dict(existing_item_consumed)
+    for item_id, users in new_item_consumed.items():
+        if item_id in merged_item_consumed:
+            merged_item_consumed[item_id].extend(users)
+        else:
+            merged_item_consumed[item_id] = list(users)
+
+    return merged_user_consumed, merged_item_consumed

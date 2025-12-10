@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from endrs.data.batch import BatchData, EvalBatchData
-from endrs.data.consumed import interaction_consumed
+from endrs.data.consumed import interaction_consumed, merge_consumed_data
 from endrs.data.data_info import DataInfo, IdConverter
 from endrs.feature.feat_info import FeatInfo
 from endrs.types import ItemId
@@ -440,7 +440,8 @@ class Dataset:
                 raise ValueError(
                     "TorchBase model must use hash-based data representation for retraining."
                 )
-            return HashDataset(
+            return HashDataset.for_retrain(
+                model=model,
                 user_col_name=user_col_name,
                 item_col_name=item_col_name,
                 label_col_name=label_col_name,
@@ -448,8 +449,6 @@ class Dataset:
                 shuffle=shuffle,
                 pop_num=pop_num,
                 seed=seed,
-                n_hash_bins=model.data_info.n_hash_bins,
-                retrain=True,
             )
 
         if isinstance(model, Swing):
@@ -505,7 +504,12 @@ class ExtendableDataset(Dataset):
         test_data: pd.DataFrame | None = None,
     ):
         super().build_data(train_data, eval_data, test_data)
-        user_consumed, item_consumed = self._merge_consumed_data()
+        user_consumed, item_consumed = merge_consumed_data(
+            self.model.data_info.user_consumed,
+            self.model.data_info.item_consumed,
+            self.data_info.user_consumed,
+            self.data_info.item_consumed,
+        )
         self.data_info.user_consumed = user_consumed
         self.data_info.item_consumed = item_consumed
         self.model.update_data_info(self.data_info)
@@ -527,41 +531,57 @@ class ExtendableDataset(Dataset):
         for i, user in enumerate(new_users, start=max_user_id + 1):
             new_user2id[user] = i
             new_id2user[i] = user
-            
+
         new_item2id = {}
         new_id2item = {}
         for i, item in enumerate(new_items, start=max_item_id + 1):
             new_item2id[item] = i
             new_id2item[i] = item
-        
+
         existing_converter.update(new_user2id, new_item2id, new_id2user, new_id2item)
         return existing_converter
 
-    def _merge_consumed_data(self) -> tuple[dict, dict]:
-        """Merge new consumed data with existing consumed data."""
-        existing_user_consumed = self.model.data_info.user_consumed
-        existing_item_consumed = self.model.data_info.item_consumed
-        new_user_consumed = self.data_info.user_consumed
-        new_item_consumed = self.data_info.item_consumed
-
-        merged_user_consumed = dict(existing_user_consumed)
-        for user_id, items in new_user_consumed.items():
-            if user_id in merged_user_consumed:
-                merged_user_consumed[user_id].extend(items)
-            else:
-                merged_user_consumed[user_id] = list(items)
-        
-        merged_item_consumed = dict(existing_item_consumed)
-        for item_id, users in new_item_consumed.items():
-            if item_id in merged_item_consumed:
-                merged_item_consumed[item_id].extend(users)
-            else:
-                merged_item_consumed[item_id] = list(users)
-        
-        return merged_user_consumed, merged_item_consumed
-
 
 class HashDataset(Dataset):
+    """Dataset that uses hash-based ID mapping for dynamic vocabularies.
+
+    This dataset hashes user and item IDs to fixed-size bins, enabling:
+    - Unlimited vocabulary (any new user/item can be hashed)
+    - Constant memory usage regardless of entity count
+    - Incremental training without vocabulary extension
+
+    The tradeoff is potential hash collisions and inability to retrieve
+    original IDs from hash values.
+
+    Parameters
+    ----------
+    user_col_name : str
+        Name of the user column in the data.
+    item_col_name : str
+        Name of the item column in the data.
+    label_col_name : str or None, default: None
+        Name of the label column in the data.
+    multi_label_col_names : Sequence[str] or None, default: None
+        Names of multi-label columns for multi-task learning.
+    shuffle : bool, default: False
+        Whether to shuffle the data.
+    pop_num : int, default: 100
+        Number of popular items to track.
+    seed : int, default: 42
+        Random seed for reproducibility and hashing.
+    n_hash_bins : int, default: 200_000
+        Number of hash bins for ID mapping. Larger values reduce collisions
+        but increase memory usage.
+
+    Notes
+    -----
+    Only sparse features are supported in hash mode. Dense and multi-sparse
+    features are not available.
+
+    For incremental training, use the :meth:`for_retrain` class method instead
+    of the constructor.
+    """
+
     def __init__(
         self,
         user_col_name: str,
@@ -572,7 +592,6 @@ class HashDataset(Dataset):
         pop_num: int = 100,
         seed: int = 42,
         n_hash_bins: int = 200_000,
-        retrain: bool = False,
     ):
         super().__init__(
             user_col_name,
@@ -585,10 +604,68 @@ class HashDataset(Dataset):
         )
         self.n_hash_bins = n_hash_bins
         self.hasher = Hasher(n_hash_bins, seed)
-        self.retrain = retrain
+        self.retrain = False
+        self.model = None
         self.id_converter = None
         self.feat_unique = None
         self.sparse_val_to_idx = None
+
+    @classmethod
+    def for_retrain(
+        cls,
+        model: "TorchBase",
+        user_col_name: str,
+        item_col_name: str,
+        label_col_name: str | None = None,
+        multi_label_col_names: Sequence[str] | None = None,
+        shuffle: bool = False,
+        pop_num: int = 100,
+        seed: int = 42,
+    ) -> "HashDataset":
+        """Create a HashDataset configured for incremental training.
+
+        Parameters
+        ----------
+        model : TorchBase
+            Existing trained model to create retraining dataset from.
+        user_col_name : str
+            Name of the user column in the data.
+        item_col_name : str
+            Name of the item column in the data.
+        label_col_name : str or None, default: None
+            Name of the label column in the data.
+        multi_label_col_names : Sequence[str] or None, default: None
+            Names of multi-label columns for multi-task learning.
+        shuffle : bool, default: False
+            Whether to shuffle the data.
+        pop_num : int, default: 100
+            Number of popular items to track.
+        seed : int, default: 42
+            Random seed for reproducibility and hashing.
+
+        Returns
+        -------
+        HashDataset
+            Dataset instance configured for incremental training.
+        """
+        dataset = cls(
+            user_col_name,
+            item_col_name,
+            label_col_name,
+            multi_label_col_names,
+            shuffle,
+            pop_num,
+            seed,
+            n_hash_bins=model.data_info.n_hash_bins,
+        )
+        dataset.retrain = True
+        dataset.model = model
+        dataset.id_converter = model.data_info.id_converter
+        dataset.feat_unique = model.feat_info.feat_unique if model.feat_info else None
+        dataset.sparse_val_to_idx = (
+            model.feat_info.sparse_val_to_idx if model.feat_info else None
+        )
+        return dataset
 
     def build_data(
         self,
@@ -599,6 +676,16 @@ class HashDataset(Dataset):
         super().build_data(train_data, eval_data, test_data)
         self.data_info.use_hash = True
         self.data_info.n_hash_bins = self.n_hash_bins
+        if self.retrain:
+            user_consumed, item_consumed = merge_consumed_data(
+                self.model.data_info.user_consumed,
+                self.model.data_info.item_consumed,
+                self.data_info.user_consumed,
+                self.data_info.item_consumed,
+            )
+            self.data_info.user_consumed = user_consumed
+            self.data_info.item_consumed = item_consumed
+            self.model.update_data_info(self.data_info)
 
     def _build_id_converter(
         self, user_unique_vals: np.ndarray, item_unique_vals: np.ndarray
@@ -649,7 +736,10 @@ class HashDataset(Dataset):
             user_feat_data, item_feat_data, user_sparse_cols, item_sparse_cols
         )
         if self.retrain:
-            assert self.feat_unique is not None and self.sparse_val_to_idx is not None
+            if self.feat_unique is None or self.sparse_val_to_idx is None:
+                raise ValueError(
+                    "Cannot add features during retrain if original model had no features"
+                )
             for col, unique_vals in sparse_unique_vals.items():
                 val_to_idx = self.hasher.to_hash_mapping(col, unique_vals.tolist())
                 self.sparse_val_to_idx[col].update(val_to_idx)
@@ -671,3 +761,6 @@ class HashDataset(Dataset):
             feat_unique=self.feat_unique or None,
             sparse_val_to_idx=self.sparse_val_to_idx or None,
         )
+
+        if self.retrain:
+            self.model.feat_info = self.feat_info
