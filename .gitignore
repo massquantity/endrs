@@ -8,3 +8,16 @@ wheels/
 
 # Virtual environments
 .venv
+venv/
+
+# IDE
+.idea/
+
+# Python tools cache
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Rust-generated files
+target/
+Cargo.lock
