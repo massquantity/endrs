@@ -115,6 +115,17 @@ pub(crate) fn forward_cosine(
     Ok(cosine_sims)
 }
 
+#[inline]
+fn update_pair_stats(acc: &mut FxHashMap<u64, CumValues>, x1: u32, x2: u32, prod_val: f32) {
+    let key = encode_pair(x1, x2);
+    acc.entry(key)
+        .and_modify(|(p, c)| {
+            *p += prod_val;
+            *c += 1;
+        })
+        .or_insert((prod_val, 1));
+}
+
 /// Process item pairs in a single row with batching for long rows
 fn process_row_batched(
     acc: &mut FxHashMap<u64, (f32, usize)>,
@@ -131,18 +142,13 @@ fn process_row_batched(
 
         // Pairs within batch A
         for i in start_a..end_a {
-            let x1 = row_indices[i];
-            let d1 = row_data[i];
             for j in (i + 1)..end_a {
-                let x2 = row_indices[j];
-                let key = encode_pair(x1, x2);
-                let prod_val = d1 * row_data[j];
-                acc.entry(key)
-                    .and_modify(|(p, c)| {
-                        *p += prod_val;
-                        *c += 1;
-                    })
-                    .or_insert((prod_val, 1));
+                update_pair_stats(
+                    acc,
+                    row_indices[i],
+                    row_indices[j],
+                    row_data[i] * row_data[j],
+                );
             }
         }
 
@@ -150,20 +156,14 @@ fn process_row_batched(
         for batch_b in (batch_a + 1)..num_batches {
             let start_b = batch_b * BATCH_SIZE;
             let end_b = (start_b + BATCH_SIZE).min(row_len);
-
             for i in start_a..end_a {
-                let x1 = row_indices[i];
-                let d1 = row_data[i];
                 for j in start_b..end_b {
-                    let x2 = row_indices[j];
-                    let key = encode_pair(x1, x2);
-                    let prod_val = d1 * row_data[j];
-                    acc.entry(key)
-                        .and_modify(|(p, c)| {
-                            *p += prod_val;
-                            *c += 1;
-                        })
-                        .or_insert((prod_val, 1));
+                    update_pair_stats(
+                        acc,
+                        row_indices[i],
+                        row_indices[j],
+                        row_data[i] * row_data[j],
+                    );
                 }
             }
         }
