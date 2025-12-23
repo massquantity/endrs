@@ -8,7 +8,7 @@ use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
 use crate::serialization::{load_model, save_model};
 use crate::similarities::{compute_sum_squares, forward_cosine, invert_cosine, sort_by_sims};
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{CumValues, DEFAULT_PRED, OOV_IDX};
+use crate::utils::{create_thread_pool, CumValues, DEFAULT_PRED, OOV_IDX};
 
 #[pyclass(module = "recfarm", name = "ItemCF")]
 #[derive(Serialize, Deserialize)]
@@ -87,15 +87,16 @@ impl PyItemCF {
                 self.min_common,
             )?
         } else {
-            std::env::set_var("RAYON_NUM_THREADS", format!("{num_threads}"));
-            // rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global().unwrap();
-            forward_cosine(
-                &self.item_interactions,
-                &self.sum_squares,
-                &mut self.cum_values,
-                self.n_items,
-                self.min_common,
-            )?
+            let pool = create_thread_pool(num_threads)?;
+            pool.install(|| {
+                forward_cosine(
+                    &self.item_interactions,
+                    &self.sum_squares,
+                    &mut self.cum_values,
+                    self.n_items,
+                    self.min_common,
+                )
+            })?
         };
         sort_by_sims(self.n_items, &cosine_sims, &mut self.sim_mapping)?;
         Ok(())
