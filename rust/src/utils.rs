@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::PyResult;
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -7,15 +5,40 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 pub(crate) const OOV_IDX: usize = 0;
 pub(crate) const DEFAULT_PRED: f32 = 0.0;
 
-pub(crate) type CumValues = (i32, i32, f32, usize);
+#[derive(Debug)]
+pub(crate) struct SimVals {
+    pub(crate) x1: i32,
+    pub(crate) x2: i32,
+    pub(crate) prod: f32,
+    pub(crate) count: usize,
+    pub(crate) cosine: f32,
+}
 
-pub(crate) fn create_thread_pool(num_threads: usize) -> PyResult<Arc<ThreadPool>> {
+// (prod, count)
+pub(crate) type CumValues = (f32, usize);
+
+/// Encodes a pair of i32 values into a single u64 key.
+/// x1 is stored in the upper 32 bits, x2 in the lower 32 bits.
+#[inline]
+pub(crate) fn encode_pair(x1: i32, x2: i32) -> u64 {
+    ((x1 as u64) << 32) | (x2 as u64)
+}
+
+/// Decodes a u64 key back into a pair of usize values.
+#[inline]
+pub(crate) fn decode_pair(key: u64) -> (usize, usize) {
+    let x1 = (key >> 32) as usize;
+    let x2 = (key & 0xFFFFFFFF) as usize;
+    (x1, x2)
+}
+
+pub(crate) fn create_thread_pool(num_threads: usize) -> PyResult<ThreadPool> {
     let pool = ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create thread pool: {}", e)))?;
 
-    Ok(Arc::new(pool))
+    Ok(pool)
 }
 
 #[cfg(test)]

@@ -6,20 +6,21 @@ use pyo3::PyResult;
 use rayon::prelude::*;
 
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::CumValues;
+use crate::utils::{decode_pair, encode_pair, CumValues, SimVals};
 
-const MAX_BLOCK_SIZE: i64 = 200_000_000;
+const BATCH_SIZE: usize = 1000;
 
 pub(crate) fn compute_sum_squares(interactions: &CsrMatrix<i32, f32>, num: usize) -> Vec<f32> {
-    (0..num)
-        .map(|i| {
-            get_row(interactions, i, false)
-                .map_or(0.0, |row| row.fold(0.0, |ss, (_, d)| ss + d * d))
-        })
-        .collect()
+    let mut sum_squares = vec![0.0; num + 1];
+    // skip oov 0
+    for (i, sum_sq) in sum_squares.iter_mut().enumerate().skip(1) {
+        *sum_sq = get_row(interactions, i, false)
+            .map_or(0.0, |row| row.fold(0.0, |ss, (_, d)| ss + d * d))
+    }
+    sum_squares
 }
 
-fn compute_cosine(prod: f32, sum_squ1: f32, sum_squ2: f32) -> f32 {
+pub(crate) fn compute_cosine(prod: f32, sum_squ1: f32, sum_squ2: f32) -> f32 {
     if prod == 0.0 || sum_squ1 == 0.0 || sum_squ2 == 0.0 {
         0.0
     } else {
@@ -28,24 +29,15 @@ fn compute_cosine(prod: f32, sum_squ1: f32, sum_squ2: f32) -> f32 {
     }
 }
 
-#[derive(Debug)]
-struct SimVals {
-    x1: i32,
-    x2: i32,
-    prod: f32,
-    count: usize,
-    cosine: f32,
-}
-
 fn compute_row_sims(
     interactions: &CsrMatrix<i32, f32>,
     sum_squares: &[f32],
-    n_x: usize,
+    n: usize,
     x1: usize,
 ) -> Vec<SimVals> {
     let (indices, indptr, data) = interactions.values();
-    let mut res = Vec::new();
-    for x2 in (x1 + 1)..n_x {
+    let mut sims = Vec::new();
+    for x2 in (x1 + 1)..=n {
         let mut i = indptr[x1];
         let mut j = indptr[x2];
         let end1 = indptr[x1 + 1];
@@ -66,31 +58,36 @@ fn compute_row_sims(
                 }
             }
         }
-        res.push(SimVals {
+
+        let cosine = compute_cosine(prod, sum_squares[x1], sum_squares[x2]);
+        let sim = SimVals {
             x1: x1 as i32,
             x2: x2 as i32,
             prod,
             count,
-            cosine: compute_cosine(prod, sum_squares[x1], sum_squares[x2]),
-        });
+            cosine,
+        };
+
+        sims.push(sim);
     }
-    res
+    sims
 }
 
 pub(crate) fn forward_cosine(
     interactions: &CsrMatrix<i32, f32>,
     sum_squares: &[f32],
-    cum_values: &mut FxHashMap<i32, CumValues>,
-    n_x: usize,
+    cum_values: &mut FxHashMap<u64, CumValues>,
+    n: usize,
     min_common: usize,
 ) -> PyResult<Vec<(i32, i32, f32)>> {
     let start = Instant::now();
-    let sim_vals: Vec<SimVals> = (0..n_x)
+    let sim_vals: Vec<SimVals> = (1..=n)
         .into_par_iter()
-        .flat_map(|x| compute_row_sims(interactions, sum_squares, n_x, x))
+        .flat_map(|x| compute_row_sims(interactions, sum_squares, n, x))
         .collect();
-    let n_x = i32::try_from(n_x)?;
+
     let mut cosine_sims: Vec<(i32, i32, f32)> = Vec::new();
+
     for SimVals {
         x1,
         x2,
@@ -103,73 +100,130 @@ pub(crate) fn forward_cosine(
             cosine_sims.push((x1, x2, cosine));
         }
         if count > 0 {
-            let key = x1 * n_x + x2;
-            cum_values.insert(key, (x1, x2, prod, count));
+            let key = encode_pair(x1, x2);
+            cum_values.insert(key, (prod, count));
         }
     }
+
     let duration = start.elapsed();
     println!(
         "forward cosine sim: {} elapsed: {:.4?}",
         cosine_sims.len(),
         duration
     );
+
     Ok(cosine_sims)
 }
 
-/// Divide `n_x` into several blocks to avoid huge memory consumption.
-pub(crate) fn invert_cosine(
-    interactions: &CsrMatrix<i32, f32>,
-    sum_squares: &[f32],
-    cum_values: &mut FxHashMap<i32, CumValues>,
-    n_x: usize,
-    n_y: usize,
-    min_common: usize,
-) -> PyResult<Vec<(i32, i32, f32)>> {
-    let (indices, indptr, data) = interactions.values();
-    let start = Instant::now();
-    let mut cosine_sims: Vec<(i32, i32, f32)> = Vec::new();
-    let step = (MAX_BLOCK_SIZE as f64 / n_x as f64).ceil() as usize;
-    for block_start in (0..n_x).step_by(step) {
-        let block_end = std::cmp::min(block_start + step, n_x);
-        let block_size = block_end - block_start;
-        let mut prods = vec![0.0; block_size * n_x];
-        let mut counts = vec![0; block_size * n_x];
-        for p in 0..n_y {
-            let x_start = indptr[p];
-            let x_end = indptr[p + 1];
-            for i in x_start..x_end {
-                let x1 = usize::try_from(indices[i])?;
-                if x1 >= block_start && x1 < block_end {
-                    for j in (i + 1)..x_end {
-                        let x2 = usize::try_from(indices[j])?;
-                        let index = (x1 - block_start) * n_x + x2;
-                        let value = data[i] * data[j];
-                        prods[index] += value;
-                        counts[index] += 1;
-                    }
-                }
+/// Process item pairs in a single row with batching for long rows
+fn process_row_batched(
+    acc: &mut FxHashMap<u64, (f32, usize)>,
+    row_indices: &[i32],
+    row_data: &[f32],
+) {
+    let row_len = row_indices.len();
+    // ceiling division
+    let num_batches = (row_len + BATCH_SIZE - 1) / BATCH_SIZE;
+
+    for batch_a in 0..num_batches {
+        let start_a = batch_a * BATCH_SIZE;
+        let end_a = (start_a + BATCH_SIZE).min(row_len);
+
+        // Pairs within batch A
+        for i in start_a..end_a {
+            let x1 = row_indices[i];
+            let d1 = row_data[i];
+            for j in (i + 1)..end_a {
+                let x2 = row_indices[j];
+                let key = encode_pair(x1, x2);
+                let prod_val = d1 * row_data[j];
+                acc.entry(key)
+                    .and_modify(|(p, c)| {
+                        *p += prod_val;
+                        *c += 1;
+                    })
+                    .or_insert((prod_val, 1));
             }
         }
 
-        for x1 in block_start..block_end {
-            for x2 in (x1 + 1)..n_x {
-                let index = (x1 - block_start) * n_x + x2;
-                let prod = prods[index];
-                let count = counts[index];
-                let sq1 = sum_squares[x1];
-                let sq2 = sum_squares[x2];
-                let key = i32::try_from(x1 * n_x + x2)?;
-                let x1 = i32::try_from(x1)?;
-                let x2 = i32::try_from(x2)?;
-                if count >= min_common {
-                    cosine_sims.push((x1, x2, compute_cosine(prod, sq1, sq2)));
-                }
-                if count > 0 {
-                    cum_values.insert(key, (x1, x2, prod, count));
+        // Pairs between batch A and subsequent batches
+        for batch_b in (batch_a + 1)..num_batches {
+            let start_b = batch_b * BATCH_SIZE;
+            let end_b = (start_b + BATCH_SIZE).min(row_len);
+
+            for i in start_a..end_a {
+                let x1 = row_indices[i];
+                let d1 = row_data[i];
+                for j in start_b..end_b {
+                    let x2 = row_indices[j];
+                    let key = encode_pair(x1, x2);
+                    let prod_val = d1 * row_data[j];
+                    acc.entry(key)
+                        .and_modify(|(p, c)| {
+                            *p += prod_val;
+                            *c += 1;
+                        })
+                        .or_insert((prod_val, 1));
                 }
             }
         }
     }
+}
+
+pub(crate) fn compute_pair_stats(
+    interactions: &CsrMatrix<i32, f32>,
+    n: usize,
+) -> FxHashMap<u64, (f32, usize)> {
+    let (indices, indptr, data) = interactions.values();
+
+    (1..=n)
+        .into_par_iter()
+        .fold(FxHashMap::default, |mut acc, i| {
+            let row_start = indptr[i];
+            let row_end = indptr[i + 1];
+            if row_end - row_start < 2 {
+                return acc;
+            }
+            let row_indices = &indices[row_start..row_end];
+            let row_data = &data[row_start..row_end];
+            process_row_batched(&mut acc, row_indices, row_data);
+            acc
+        })
+        .reduce(FxHashMap::default, |mut a, b| {
+            for (k, (p, c)) in b {
+                a.entry(k)
+                    .and_modify(|(ap, ac)| {
+                        *ap += p;
+                        *ac += c;
+                    })
+                    .or_insert((p, c));
+            }
+            a
+        })
+}
+
+pub(crate) fn invert_cosine(
+    interactions: &CsrMatrix<i32, f32>,
+    sum_squares: &[f32],
+    cum_values: &mut FxHashMap<u64, CumValues>,
+    n: usize,
+    min_common: usize,
+) -> PyResult<Vec<(i32, i32, f32)>> {
+    let start = Instant::now();
+    let pair_stats = compute_pair_stats(interactions, n);
+    let mut cosine_sims = Vec::new();
+
+    for (key, (prod, count)) in pair_stats {
+        if count > 0 {
+            cum_values.insert(key, (prod, count));
+        }
+        if count >= min_common {
+            let (x1, x2) = decode_pair(key);
+            let cosine = compute_cosine(prod, sum_squares[x1], sum_squares[x2]);
+            cosine_sims.push((x1 as i32, x2 as i32, cosine));
+        }
+    }
+
     let duration = start.elapsed();
     println!(
         "invert cosine sim: {} elapsed: {:.4?}",
@@ -180,28 +234,32 @@ pub(crate) fn invert_cosine(
 }
 
 pub(crate) fn sort_by_sims(
-    n_x: usize,
+    n: usize,
     cosine_sims: &[(i32, i32, f32)],
     sim_mapping: &mut FxHashMap<i32, (Vec<i32>, Vec<f32>)>,
 ) -> PyResult<()> {
     let start = Instant::now();
-    let mut agg_sims: Vec<Vec<(i32, f32)>> = vec![Vec::new(); n_x];
+    let mut agg_sims: Vec<Vec<(i32, f32)>> = vec![Vec::new(); n + 1];
+
     for &(x1, x2, sim) in cosine_sims {
         agg_sims[usize::try_from(x1)?].push((x2, sim));
         agg_sims[usize::try_from(x2)?].push((x1, sim));
     }
 
-    for (i, neighbor_sims) in agg_sims.iter_mut().enumerate() {
+    for (i, neighbor_sims) in agg_sims.iter_mut().enumerate().skip(1) {
         if neighbor_sims.is_empty() {
             continue;
         }
         neighbor_sims.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+
         let (neighbors, sims) = neighbor_sims
             .iter()
             .map(|(n, s)| (*n, *s))
             .unzip();
+
         sim_mapping.insert(i32::try_from(i)?, (neighbors, sims));
     }
+
     let duration = start.elapsed();
     println!("sort elapsed: {duration:.4?}");
     Ok(())
