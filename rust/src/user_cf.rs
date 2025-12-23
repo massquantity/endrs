@@ -8,7 +8,7 @@ use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
 use crate::serialization::{load_model, save_model};
 use crate::similarities::{compute_sum_squares, forward_cosine, invert_cosine, sort_by_sims};
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::CumValues;
+use crate::utils::{CumValues, DEFAULT_PRED, OOV_IDX};
 
 #[pyclass(module = "recfarm", name = "UserCF")]
 #[derive(Serialize, Deserialize)]
@@ -19,12 +19,11 @@ pub struct PyUserCF {
     n_items: usize,
     min_common: usize,
     sum_squares: Vec<f32>,
-    cum_values: FxHashMap<i32, CumValues>,
+    cum_values: FxHashMap<u64, CumValues>,
     sim_mapping: FxHashMap<i32, (Vec<i32>, Vec<f32>)>,
     user_interactions: CsrMatrix<i32, f32>,
     item_interactions: CsrMatrix<i32, f32>,
     user_consumed: FxHashMap<i32, Vec<i32>>,
-    default_pred: f32,
 }
 
 #[pymethods]
@@ -56,7 +55,6 @@ impl PyUserCF {
         user_interactions: &Bound<'_, PyAny>,
         item_interactions: &Bound<'_, PyAny>,
         user_consumed: &Bound<'_, PyDict>,
-        default_pred: f32,
     ) -> PyResult<Self> {
         let user_interactions: CsrMatrix<i32, f32> = user_interactions.extract()?;
         let item_interactions: CsrMatrix<i32, f32> = item_interactions.extract()?;
@@ -73,7 +71,6 @@ impl PyUserCF {
             user_interactions,
             item_interactions,
             user_consumed,
-            default_pred,
         })
     }
 
@@ -86,7 +83,6 @@ impl PyUserCF {
                 &self.item_interactions,
                 &self.sum_squares,
                 &mut self.cum_values,
-                self.n_users,
                 self.n_items,
                 self.min_common,
             )?
@@ -105,6 +101,41 @@ impl PyUserCF {
         Ok(())
     }
 
+    /// update on new sparse interactions
+    fn update_similarities(
+        &mut self,
+        user_interactions: &Bound<'_, PyAny>,
+        item_interactions: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let new_user_interactions: CsrMatrix<i32, f32> = user_interactions.extract()?;
+        let new_item_interactions: CsrMatrix<i32, f32> = item_interactions.extract()?;
+
+        update_sum_squares(&mut self.sum_squares, &new_user_interactions, self.n_users);
+
+        let cosine_sims = update_cosine(
+            &new_item_interactions,
+            &self.sum_squares,
+            &mut self.cum_values,
+            self.n_items,
+            self.min_common,
+        )?;
+
+        update_by_sims(self.n_users, &cosine_sims, &mut self.sim_mapping)?;
+
+        // merge interactions for inference on new users/items
+        self.user_interactions = CsrMatrix::merge(
+            &self.user_interactions,
+            &new_user_interactions,
+            self.n_users,
+        );
+        self.item_interactions = CsrMatrix::merge(
+            &self.item_interactions,
+            &new_item_interactions,
+            self.n_items,
+        );
+        Ok(())
+    }
+
     fn num_sim_elements(&self) -> PyResult<usize> {
         let n_elements = self.sim_mapping.values().map(|i| i.0.len()).sum();
         Ok(n_elements)
@@ -116,8 +147,8 @@ impl PyUserCF {
         let users: Vec<i32> = users.extract()?;
         let items: Vec<usize> = items.extract()?;
         for (&u, &i) in users.iter().zip(items.iter()) {
-            if usize::try_from(u)? == self.n_users || i == self.n_items {
-                preds.push(self.default_pred);
+            if usize::try_from(u)? == OOV_IDX || i == OOV_IDX {
+                preds.push(DEFAULT_PRED);
                 continue;
             }
             let pred = match (
@@ -136,12 +167,12 @@ impl PyUserCF {
                     let (k_nb_sims, k_nb_labels) =
                         get_intersect_neighbors(&user_sims, &user_labels, self.k_sim);
                     if k_nb_sims.is_empty() {
-                        self.default_pred
+                        DEFAULT_PRED
                     } else {
                         compute_pred(&self.task, &k_nb_sims, &k_nb_labels)?
                     }
                 }
-                _ => self.default_pred,
+                _ => DEFAULT_PRED,
             };
             preds.push(pred);
         }
@@ -165,6 +196,7 @@ impl PyUserCF {
                 .user_consumed
                 .get(&u)
                 .map_or(FxHashSet::default(), FxHashSet::from_iter);
+
             if let Some((sim_users, sim_values)) = self.sim_mapping.get(&u) {
                 let mut item_scores: FxHashMap<i32, f32> = FxHashMap::default();
                 let sim_num = std::cmp::min(self.k_sim, sim_users.len());
@@ -202,38 +234,6 @@ impl PyUserCF {
         let no_rec_indices = PyList::new(py, no_rec_indices)?;
         Ok((recs, no_rec_indices))
     }
-
-    /// update on new sparse interactions
-    fn update_similarities(
-        &mut self,
-        user_interactions: &Bound<'_, PyAny>,
-        item_interactions: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let new_user_interactions: CsrMatrix<i32, f32> = user_interactions.extract()?;
-        let new_item_interactions: CsrMatrix<i32, f32> = item_interactions.extract()?;
-        update_sum_squares(&mut self.sum_squares, &new_user_interactions, self.n_users);
-        let cosine_sims = update_cosine(
-            &new_item_interactions,
-            &self.sum_squares,
-            &mut self.cum_values,
-            self.n_users,
-            self.min_common,
-        )?;
-        update_by_sims(self.n_users, &cosine_sims, &mut self.sim_mapping)?;
-
-        // merge interactions for inference on new users/items
-        self.user_interactions = CsrMatrix::merge(
-            &self.user_interactions,
-            &new_user_interactions,
-            Some(self.n_users),
-        );
-        self.item_interactions = CsrMatrix::merge(
-            &self.item_interactions,
-            &new_item_interactions,
-            Some(self.n_items),
-        );
-        Ok(())
-    }
 }
 
 #[pyfunction]
@@ -270,38 +270,39 @@ mod tests {
         let n_users = 5;
         let n_items = 4;
         let min_common = 1;
-        let default_pred = 0.0;
         let user_cf = Python::with_gil(|py| -> PyResult<PyUserCF> {
-            // user_interactions:
+            // user_interactions (6 rows: OOV + users 1-5):
             // [
-            //     [1, 1, 0, 0],
-            //     [2, 1, 0, 0],
-            //     [0, 1, 1, 0],
-            //     [2, 1, 1, 0],
-            //     [0, 1, 2, 0],
+            //     [],               // row 0: OOV
+            //     [0, 1, 1, 0, 0],  // row 1 (user 1)
+            //     [0, 2, 1, 0, 0],  // row 2 (user 2)
+            //     [0, 0, 1, 1, 0],  // row 3 (user 3)
+            //     [0, 2, 1, 1, 0],  // row 4 (user 4)
+            //     [0, 0, 1, 2, 0],  // row 5 (user 5)
             // ]
             let user_interactions = Bound::new(
                 py,
                 PySparseMatrix {
-                    sparse_indices: vec![0, 1, 0, 1, 1, 2, 0, 1, 2, 1, 2],
-                    sparse_indptr: vec![0, 2, 4, 6, 9, 11],
+                    sparse_indices: vec![1, 2, 1, 2, 2, 3, 1, 2, 3, 2, 3],
+                    sparse_indptr: vec![0, 0, 2, 4, 6, 9, 11],
                     sparse_data: vec![1., 1., 2., 1., 1., 1., 2., 1., 1., 1., 2.],
                 },
             )?;
+            // item_interactions (5 rows: OOV + items 1-4):
             let item_interactions = Bound::new(
                 py,
                 PySparseMatrix {
-                    sparse_indices: vec![0, 1, 3, 0, 1, 2, 3, 4, 2, 3, 4],
-                    sparse_indptr: vec![0, 3, 8, 11, 11],
+                    sparse_indices: vec![1, 2, 4, 1, 2, 3, 4, 5, 3, 4, 5],
+                    sparse_indptr: vec![0, 0, 3, 8, 11, 11],
                     sparse_data: vec![1., 2., 2., 1., 1., 1., 1., 1., 1., 1., 2.],
                 },
             )?;
             let user_consumed = [
-                (0, vec![0, 1]),
-                (1, vec![0, 1]),
+                (1, vec![1, 2]),
                 (2, vec![1, 2]),
-                (3, vec![0, 1, 2]),
-                (4, vec![1, 2]),
+                (3, vec![2, 3]),
+                (4, vec![1, 2, 3]),
+                (5, vec![2, 3]),
             ]
             .into_py_dict(py)?;
 
@@ -314,7 +315,6 @@ mod tests {
                 &user_interactions,
                 &item_interactions,
                 &user_consumed,
-                default_pred,
             )?;
             user_cf.compute_similarities(true, 1)?;
             Ok(user_cf)
@@ -327,11 +327,11 @@ mod tests {
         let get_nbs = |model: &PyUserCF, u: i32| model.sim_mapping[&u].0.to_owned();
         pyo3::prepare_freethreaded_python();
         let user_cf = get_user_cf()?;
-        assert_eq!(get_nbs(&user_cf, 0), vec![1, 3, 2, 4]);
-        assert_eq!(get_nbs(&user_cf, 1), vec![0, 3, 2, 4]);
-        assert_eq!(get_nbs(&user_cf, 2), vec![4, 3, 0, 1]);
-        assert_eq!(get_nbs(&user_cf, 3), vec![1, 0, 2, 4]);
-        assert_eq!(get_nbs(&user_cf, 4), vec![2, 3, 0, 1]);
+        assert_eq!(get_nbs(&user_cf, 1), vec![2, 4, 3, 5]);
+        assert_eq!(get_nbs(&user_cf, 2), vec![1, 4, 3, 5]);
+        assert_eq!(get_nbs(&user_cf, 3), vec![5, 4, 1, 2]);
+        assert_eq!(get_nbs(&user_cf, 4), vec![2, 1, 3, 5]);
+        assert_eq!(get_nbs(&user_cf, 5), vec![3, 4, 1, 2]);
         Ok(())
     }
 
@@ -341,38 +341,40 @@ mod tests {
         pyo3::prepare_freethreaded_python();
         let mut user_cf = get_user_cf()?;
         Python::with_gil(|py| -> PyResult<()> {
-            // larger user_interactions:
+            // larger user_interactions (7 rows: OOV + users 1-6, 6 cols: OOV + items 1-5):
             // [
-            //     [0, 0, 0, 0, 0],
-            //     [3, 0, 0, 0, 0],
-            //     [5, 0, 0, 0, 0],
-            //     [0, 0, 0, 0, 0],
-            //     [0, 0, 0, 0, 0],
-            //     [2, 2, 1, 2, 0],
+            //     [],                    // row 0: OOV
+            //     [],                    // row 1 (user 1)
+            //     [0, 3, 0, 0, 0, 0],    // row 2 (user 2)
+            //     [0, 5, 0, 0, 0, 0],    // row 3 (user 3)
+            //     [],                    // row 4 (user 4)
+            //     [],                    // row 5 (user 5)
+            //     [0, 2, 2, 1, 2, 0],    // row 6 (user 6)
             // ]
             let user_interactions = Bound::new(
                 py,
                 PySparseMatrix {
-                    sparse_indices: vec![0, 0, 0, 1, 2, 3],
-                    sparse_indptr: vec![0, 0, 1, 2, 2, 2, 6],
+                    sparse_indices: vec![1, 1, 1, 2, 3, 4],
+                    sparse_indptr: vec![0, 0, 0, 1, 2, 2, 2, 6],
                     sparse_data: vec![3.0, 5.0, 2.0, 2.0, 1.0, 2.0],
                 },
             )?;
+            // item_interactions (6 rows: OOV + items 1-5, 7 cols: OOV + users 1-6):
             let item_interactions = Bound::new(
                 py,
                 PySparseMatrix {
-                    sparse_indices: vec![1, 2, 5, 5, 5, 5],
-                    sparse_indptr: vec![0, 3, 4, 5, 6, 6],
+                    sparse_indices: vec![2, 3, 6, 6, 6, 6],
+                    sparse_indptr: vec![0, 0, 3, 4, 5, 6, 6],
                     sparse_data: vec![3.0, 5.0, 2.0, 2.0, 1.0, 2.0],
                 },
             )?;
             let _user_consumed = [
-                (0, vec![0, 1]),
-                (1, vec![0, 1]),
+                (1, vec![1, 2]),
                 (2, vec![1, 2]),
-                (3, vec![0, 1, 2]),
-                (4, vec![1, 2]),
-                (5, vec![0, 1, 2, 3]),
+                (3, vec![2, 3]),
+                (4, vec![1, 2, 3]),
+                (5, vec![2, 3]),
+                (6, vec![1, 2, 3, 4]),
             ]
             .into_py_dict(py)?;
 
@@ -380,51 +382,54 @@ mod tests {
             user_cf.n_items = 5;
             user_cf.user_consumed = _user_consumed.extract::<FxHashMap<i32, Vec<i32>>>()?;
             user_cf.update_similarities(&user_interactions, &item_interactions)?;
-            let users = PyList::new(py, vec![5, 1])?;
+            let users = PyList::new(py, vec![6, 2])?;
             let rec_result = user_cf.recommend(py, &users, 10, true, false)?;
             assert_eq!(rec_result.0.len(), 2);
             Ok(())
         })?;
-        assert_eq!(get_nbs(&user_cf, 0), vec![1, 3, 2, 4]);
-        assert_eq!(get_nbs(&user_cf, 1), vec![2, 0, 3, 5, 4]);
-        assert_eq!(get_nbs(&user_cf, 2), vec![1, 4, 3, 5, 0]);
-        assert_eq!(get_nbs(&user_cf, 3), vec![1, 0, 2, 4]);
-        assert_eq!(get_nbs(&user_cf, 4), vec![2, 3, 0, 1]);
-        assert_eq!(get_nbs(&user_cf, 5), vec![2, 1]);
+
+        assert_eq!(get_nbs(&user_cf, 1), vec![2, 4, 3, 5]);
+        assert_eq!(get_nbs(&user_cf, 2), vec![1, 4, 3, 6, 5]);
+        assert_eq!(get_nbs(&user_cf, 3), vec![5, 2, 4, 6, 1]);
+        assert_eq!(get_nbs(&user_cf, 4), vec![2, 1, 3, 5]);
+        assert_eq!(get_nbs(&user_cf, 5), vec![3, 4, 1, 2]);
+        assert_eq!(get_nbs(&user_cf, 6), vec![3, 2]);
 
         Python::with_gil(|py| -> PyResult<()> {
-            // smaller user_interactions:
+            // smaller user_interactions (5 rows: OOV + users 1-4, 6 cols: OOV + items 1-5):
             // [
-            //     [0, 0, 0, 3, 2],
-            //     [0, 0, 0, 0, 0],
-            //     [0, 0, 0, 0, 0],
-            //     [0, 1, 0, 4, 3],
+            //     [],                    // row 0: OOV
+            //     [0, 0, 0, 0, 3, 2],    // row 1 (user 1)
+            //     [],                    // row 2 (user 2)
+            //     [],                    // row 3 (user 3)
+            //     [0, 0, 1, 0, 4, 3],    // row 4 (user 4)
             // ]
             let user_interactions = Bound::new(
                 py,
                 PySparseMatrix {
-                    sparse_indices: vec![3, 4, 1, 3, 4],
-                    sparse_indptr: vec![0, 2, 2, 2, 5],
+                    sparse_indices: vec![4, 5, 2, 4, 5],
+                    sparse_indptr: vec![0, 0, 2, 2, 2, 5],
                     sparse_data: vec![3.0, 2.0, 1.0, 4.0, 3.0],
                 },
             )?;
+            // item_interactions (6 rows: OOV + items 1-5, 5 cols: OOV + users 1-4):
             let item_interactions = Bound::new(
                 py,
                 PySparseMatrix {
-                    sparse_indices: vec![3, 0, 3, 0, 3],
-                    sparse_indptr: vec![0, 0, 1, 1, 3, 5],
+                    sparse_indices: vec![4, 1, 4, 1, 4],
+                    sparse_indptr: vec![0, 0, 0, 1, 1, 3, 5],
                     sparse_data: vec![1.0, 3.0, 4.0, 2.0, 3.0],
                 },
             )?;
             user_cf.update_similarities(&user_interactions, &item_interactions)?;
             Ok(())
         })?;
-        assert_eq!(get_nbs(&user_cf, 0), vec![3, 1, 2, 4]);
-        assert_eq!(get_nbs(&user_cf, 1), vec![2, 0, 3, 5, 4]);
-        assert_eq!(get_nbs(&user_cf, 2), vec![1, 4, 3, 5, 0]);
-        assert_eq!(get_nbs(&user_cf, 3), vec![0, 1, 2, 4]);
-        assert_eq!(get_nbs(&user_cf, 4), vec![2, 3, 0, 1]);
-        assert_eq!(get_nbs(&user_cf, 5), vec![2, 1]);
+        assert_eq!(get_nbs(&user_cf, 1), vec![4, 2, 3, 5]);
+        assert_eq!(get_nbs(&user_cf, 2), vec![1, 4, 3, 6, 5]);
+        assert_eq!(get_nbs(&user_cf, 3), vec![5, 2, 4, 6, 1]);
+        assert_eq!(get_nbs(&user_cf, 4), vec![1, 2, 3, 5]);
+        assert_eq!(get_nbs(&user_cf, 5), vec![3, 4, 1, 2]);
+        assert_eq!(get_nbs(&user_cf, 6), vec![3, 2]);
         Ok(())
     }
 
@@ -440,7 +445,7 @@ mod tests {
 
         let new_model: PyUserCF = load(&cur_dir, model_name)?;
         Python::with_gil(|py| -> PyResult<()> {
-            let users = PyList::new(py, vec![5, 1])?;
+            let users = PyList::new(py, vec![8, 2])?;
             let rec_result = new_model.recommend(py, &users, 10, true, false)?;
             assert_eq!(rec_result.0.len(), 2);
             Ok(())
