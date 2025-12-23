@@ -17,13 +17,13 @@ pub struct PyUserCF {
     k_sim: usize,
     n_users: usize,
     n_items: usize,
-    min_common: usize,
+    min_common: u32,
     sum_squares: Vec<f32>,
     cum_values: FxHashMap<u64, CumValues>,
-    sim_mapping: FxHashMap<i32, (Vec<i32>, Vec<f32>)>,
-    user_interactions: CsrMatrix<i32, f32>,
-    item_interactions: CsrMatrix<i32, f32>,
-    user_consumed: FxHashMap<i32, Vec<i32>>,
+    sim_mapping: FxHashMap<u32, (Vec<u32>, Vec<f32>)>,
+    user_interactions: CsrMatrix<u32, f32>,
+    item_interactions: CsrMatrix<u32, f32>,
+    user_consumed: FxHashMap<u32, Vec<u32>>,
 }
 
 #[pymethods]
@@ -40,7 +40,7 @@ impl PyUserCF {
 
     #[setter]
     fn set_user_consumed(&mut self, user_consumed: &Bound<'_, PyDict>) -> PyResult<()> {
-        self.user_consumed = user_consumed.extract::<FxHashMap<i32, Vec<i32>>>()?;
+        self.user_consumed = user_consumed.extract::<FxHashMap<u32, Vec<u32>>>()?;
         Ok(())
     }
 
@@ -51,14 +51,14 @@ impl PyUserCF {
         k_sim: usize,
         n_users: usize,
         n_items: usize,
-        min_common: usize,
+        min_common: u32,
         user_interactions: &Bound<'_, PyAny>,
         item_interactions: &Bound<'_, PyAny>,
         user_consumed: &Bound<'_, PyDict>,
     ) -> PyResult<Self> {
-        let user_interactions: CsrMatrix<i32, f32> = user_interactions.extract()?;
-        let item_interactions: CsrMatrix<i32, f32> = item_interactions.extract()?;
-        let user_consumed: FxHashMap<i32, Vec<i32>> = user_consumed.extract()?;
+        let user_interactions: CsrMatrix<u32, f32> = user_interactions.extract()?;
+        let item_interactions: CsrMatrix<u32, f32> = item_interactions.extract()?;
+        let user_consumed: FxHashMap<u32, Vec<u32>> = user_consumed.extract()?;
         Ok(Self {
             task: task.to_string(),
             k_sim,
@@ -107,8 +107,8 @@ impl PyUserCF {
         user_interactions: &Bound<'_, PyAny>,
         item_interactions: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let new_user_interactions: CsrMatrix<i32, f32> = user_interactions.extract()?;
-        let new_item_interactions: CsrMatrix<i32, f32> = item_interactions.extract()?;
+        let new_user_interactions: CsrMatrix<u32, f32> = user_interactions.extract()?;
+        let new_item_interactions: CsrMatrix<u32, f32> = item_interactions.extract()?;
 
         update_sum_squares(&mut self.sum_squares, &new_user_interactions, self.n_users);
 
@@ -144,26 +144,26 @@ impl PyUserCF {
     /// sparse matrix of `item` interaction
     fn predict(&self, users: &Bound<'_, PyList>, items: &Bound<'_, PyList>) -> PyResult<Vec<f32>> {
         let mut preds = Vec::new();
-        let users: Vec<i32> = users.extract()?;
-        let items: Vec<usize> = items.extract()?;
+        let users: Vec<u32> = users.extract()?;
+        let items: Vec<u32> = items.extract()?;
         for (&u, &i) in users.iter().zip(items.iter()) {
-            if usize::try_from(u)? == OOV_IDX || i == OOV_IDX {
+            if u == OOV_IDX || i == OOV_IDX {
                 preds.push(DEFAULT_PRED);
                 continue;
             }
             let pred = match (
                 self.sim_mapping.get(&u),
-                get_row(&self.item_interactions, i, false),
+                get_row(&self.item_interactions, i as usize, false),
             ) {
                 (Some((sim_users, sim_values)), Some(user_labels)) => {
                     let sim_num = std::cmp::min(self.k_sim, sim_users.len());
-                    let mut user_sims: Vec<(i32, f32)> = sim_users[..sim_num]
+                    let mut user_sims: Vec<(u32, f32)> = sim_users[..sim_num]
                         .iter()
                         .zip(sim_values[..sim_num].iter())
                         .map(|(u, s)| (*u, *s))
                         .collect();
                     user_sims.sort_unstable_by_key(|&(u, _)| u);
-                    let user_labels: Vec<(i32, f32)> = user_labels.collect();
+                    let user_labels: Vec<(u32, f32)> = user_labels.collect();
                     let (k_nb_sims, k_nb_labels) =
                         get_intersect_neighbors(&user_sims, &user_labels, self.k_sim);
                     if k_nb_sims.is_empty() {
@@ -191,21 +191,20 @@ impl PyUserCF {
         let mut recs = Vec::new();
         let mut no_rec_indices = Vec::new();
         for (k, u) in users.iter().enumerate() {
-            let u: i32 = u.extract()?;
+            let u: u32 = u.extract()?;
             let consumed = self
                 .user_consumed
                 .get(&u)
                 .map_or(FxHashSet::default(), FxHashSet::from_iter);
 
             if let Some((sim_users, sim_values)) = self.sim_mapping.get(&u) {
-                let mut item_scores: FxHashMap<i32, f32> = FxHashMap::default();
+                let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
                 let sim_num = std::cmp::min(self.k_sim, sim_users.len());
                 for (&v, &u_v_sim) in sim_users[..sim_num]
                     .iter()
                     .zip(sim_values[..sim_num].iter())
                 {
-                    let v = usize::try_from(v)?;
-                    if let Some(row) = get_row(&self.user_interactions, v, false) {
+                    if let Some(row) = get_row(&self.user_interactions, v as usize, false) {
                         for (i, v_i_score) in row {
                             if filter_consumed && consumed.contains(&i) {
                                 continue;
@@ -257,7 +256,7 @@ mod tests {
     #[pyclass]
     struct PySparseMatrix {
         #[pyo3(get)]
-        sparse_indices: Vec<i32>,
+        sparse_indices: Vec<u32>,
         #[pyo3(get)]
         sparse_indptr: Vec<usize>,
         #[pyo3(get)]
@@ -269,7 +268,7 @@ mod tests {
         let k_sim = 10;
         let n_users = 5;
         let n_items = 4;
-        let min_common = 1;
+        let min_common = 1u32;
         let user_cf = Python::with_gil(|py| -> PyResult<PyUserCF> {
             // user_interactions (6 rows: OOV + users 1-5):
             // [
@@ -298,7 +297,7 @@ mod tests {
                 },
             )?;
             let user_consumed = [
-                (1, vec![1, 2]),
+                (1u32, vec![1u32, 2]),
                 (2, vec![1, 2]),
                 (3, vec![2, 3]),
                 (4, vec![1, 2, 3]),
@@ -324,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_user_cf_training() -> Result<(), Box<dyn std::error::Error>> {
-        let get_nbs = |model: &PyUserCF, u: i32| model.sim_mapping[&u].0.to_owned();
+        let get_nbs = |model: &PyUserCF, u: u32| model.sim_mapping[&u].0.to_owned();
         pyo3::prepare_freethreaded_python();
         let user_cf = get_user_cf()?;
         assert_eq!(get_nbs(&user_cf, 1), vec![2, 4, 3, 5]);
@@ -337,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_user_cf_incremental_training() -> Result<(), Box<dyn std::error::Error>> {
-        let get_nbs = |model: &PyUserCF, u: i32| model.sim_mapping[&u].0.to_owned();
+        let get_nbs = |model: &PyUserCF, u: u32| model.sim_mapping[&u].0.to_owned();
         pyo3::prepare_freethreaded_python();
         let mut user_cf = get_user_cf()?;
         Python::with_gil(|py| -> PyResult<()> {
@@ -369,7 +368,7 @@ mod tests {
                 },
             )?;
             let _user_consumed = [
-                (1, vec![1, 2]),
+                (1u32, vec![1u32, 2]),
                 (2, vec![1, 2]),
                 (3, vec![2, 3]),
                 (4, vec![1, 2, 3]),
@@ -380,7 +379,7 @@ mod tests {
 
             user_cf.n_users = 6;
             user_cf.n_items = 5;
-            user_cf.user_consumed = _user_consumed.extract::<FxHashMap<i32, Vec<i32>>>()?;
+            user_cf.user_consumed = _user_consumed.extract::<FxHashMap<u32, Vec<u32>>>()?;
             user_cf.update_similarities(&user_interactions, &item_interactions)?;
             let users = PyList::new(py, vec![6, 2])?;
             let rec_result = user_cf.recommend(py, &users, 10, true, false)?;

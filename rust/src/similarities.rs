@@ -10,7 +10,7 @@ use crate::utils::{decode_pair, encode_pair, CumValues, SimVals};
 
 const BATCH_SIZE: usize = 1000;
 
-pub(crate) fn compute_sum_squares(interactions: &CsrMatrix<i32, f32>, num: usize) -> Vec<f32> {
+pub(crate) fn compute_sum_squares(interactions: &CsrMatrix<u32, f32>, num: usize) -> Vec<f32> {
     let mut sum_squares = vec![0.0; num + 1];
     // skip oov 0
     for (i, sum_sq) in sum_squares.iter_mut().enumerate().skip(1) {
@@ -30,7 +30,7 @@ pub(crate) fn compute_cosine(prod: f32, sum_squ1: f32, sum_squ2: f32) -> f32 {
 }
 
 fn compute_row_sims(
-    interactions: &CsrMatrix<i32, f32>,
+    interactions: &CsrMatrix<u32, f32>,
     sum_squares: &[f32],
     n: usize,
     x1: usize,
@@ -43,7 +43,7 @@ fn compute_row_sims(
         let end1 = indptr[x1 + 1];
         let end2 = indptr[x2 + 1];
         let mut prod = 0.0;
-        let mut count = 0;
+        let mut count = 0u32;
         while i < end1 && j < end2 {
             let y1 = indices[i];
             let y2 = indices[j];
@@ -61,8 +61,8 @@ fn compute_row_sims(
 
         let cosine = compute_cosine(prod, sum_squares[x1], sum_squares[x2]);
         let sim = SimVals {
-            x1: x1 as i32,
-            x2: x2 as i32,
+            x1: x1 as u32,
+            x2: x2 as u32,
             prod,
             count,
             cosine,
@@ -74,19 +74,19 @@ fn compute_row_sims(
 }
 
 pub(crate) fn forward_cosine(
-    interactions: &CsrMatrix<i32, f32>,
+    interactions: &CsrMatrix<u32, f32>,
     sum_squares: &[f32],
     cum_values: &mut FxHashMap<u64, CumValues>,
     n: usize,
-    min_common: usize,
-) -> PyResult<Vec<(i32, i32, f32)>> {
+    min_common: u32,
+) -> PyResult<Vec<(u32, u32, f32)>> {
     let start = Instant::now();
     let sim_vals: Vec<SimVals> = (1..=n)
         .into_par_iter()
         .flat_map(|x| compute_row_sims(interactions, sum_squares, n, x))
         .collect();
 
-    let mut cosine_sims: Vec<(i32, i32, f32)> = Vec::new();
+    let mut cosine_sims: Vec<(u32, u32, f32)> = Vec::new();
 
     for SimVals {
         x1,
@@ -127,11 +127,7 @@ fn update_pair_stats(acc: &mut FxHashMap<u64, CumValues>, x1: u32, x2: u32, prod
 }
 
 /// Process item pairs in a single row with batching for long rows
-fn process_row_batched(
-    acc: &mut FxHashMap<u64, (f32, usize)>,
-    row_indices: &[i32],
-    row_data: &[f32],
-) {
+fn process_row_batched(acc: &mut FxHashMap<u64, CumValues>, row_indices: &[u32], row_data: &[f32]) {
     let row_len = row_indices.len();
     // ceiling division
     let num_batches = (row_len + BATCH_SIZE - 1) / BATCH_SIZE;
@@ -171,9 +167,9 @@ fn process_row_batched(
 }
 
 pub(crate) fn compute_pair_stats(
-    interactions: &CsrMatrix<i32, f32>,
+    interactions: &CsrMatrix<u32, f32>,
     n: usize,
-) -> FxHashMap<u64, (f32, usize)> {
+) -> FxHashMap<u64, CumValues> {
     let (indices, indptr, data) = interactions.values();
 
     (1..=n)
@@ -203,12 +199,12 @@ pub(crate) fn compute_pair_stats(
 }
 
 pub(crate) fn invert_cosine(
-    interactions: &CsrMatrix<i32, f32>,
+    interactions: &CsrMatrix<u32, f32>,
     sum_squares: &[f32],
     cum_values: &mut FxHashMap<u64, CumValues>,
     n: usize,
-    min_common: usize,
-) -> PyResult<Vec<(i32, i32, f32)>> {
+    min_common: u32,
+) -> PyResult<Vec<(u32, u32, f32)>> {
     let start = Instant::now();
     let pair_stats = compute_pair_stats(interactions, n);
     let mut cosine_sims = Vec::new();
@@ -219,8 +215,8 @@ pub(crate) fn invert_cosine(
         }
         if count >= min_common {
             let (x1, x2) = decode_pair(key);
-            let cosine = compute_cosine(prod, sum_squares[x1], sum_squares[x2]);
-            cosine_sims.push((x1 as i32, x2 as i32, cosine));
+            let cosine = compute_cosine(prod, sum_squares[x1 as usize], sum_squares[x2 as usize]);
+            cosine_sims.push((x1, x2, cosine));
         }
     }
 
@@ -235,21 +231,22 @@ pub(crate) fn invert_cosine(
 
 pub(crate) fn sort_by_sims(
     n: usize,
-    cosine_sims: &[(i32, i32, f32)],
-    sim_mapping: &mut FxHashMap<i32, (Vec<i32>, Vec<f32>)>,
+    cosine_sims: &[(u32, u32, f32)],
+    sim_mapping: &mut FxHashMap<u32, (Vec<u32>, Vec<f32>)>,
 ) -> PyResult<()> {
     let start = Instant::now();
-    let mut agg_sims: Vec<Vec<(i32, f32)>> = vec![Vec::new(); n + 1];
+    let mut agg_sims: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n + 1];
 
     for &(x1, x2, sim) in cosine_sims {
-        agg_sims[usize::try_from(x1)?].push((x2, sim));
-        agg_sims[usize::try_from(x2)?].push((x1, sim));
+        agg_sims[x1 as usize].push((x2, sim));
+        agg_sims[x2 as usize].push((x1, sim));
     }
 
     for (i, neighbor_sims) in agg_sims.iter_mut().enumerate().skip(1) {
         if neighbor_sims.is_empty() {
             continue;
         }
+
         neighbor_sims.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
 
         let (neighbors, sims) = neighbor_sims
@@ -257,7 +254,7 @@ pub(crate) fn sort_by_sims(
             .map(|(n, s)| (*n, *s))
             .unzip();
 
-        sim_mapping.insert(i32::try_from(i)?, (neighbors, sims));
+        sim_mapping.insert(i as u32, (neighbors, sims));
     }
 
     let duration = start.elapsed();

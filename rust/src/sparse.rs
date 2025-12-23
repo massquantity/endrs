@@ -114,7 +114,7 @@ where
 
 /// Analogy of `scipy.sparse.dok_matrix`
 /// https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.dok_matrix.html
-pub struct DokMatrix<T = i32, U = f32> {
+pub struct DokMatrix<T = u32, U = f32> {
     data: Vec<FxHashMap<T, U>>,
 }
 
@@ -164,7 +164,7 @@ mod tests {
     use super::*;
 
     /// Verifies CSR matrix maintains OOV layout: row 0 empty, no column 0 entries.
-    fn assert_oov_layout(matrix: &CsrMatrix<i32, i32>, n_real_rows: usize) {
+    fn assert_oov_layout(matrix: &CsrMatrix<u32, i32>, n_real_rows: usize) {
         assert_eq!(matrix.indptr[0], 0, "OOV row must stay empty");
         assert_eq!(
             matrix.indptr.len(),
@@ -187,7 +187,7 @@ mod tests {
         //   [0,0,0,0],    // row 3
         //   [0,0,0,0],    // row 4
         // ]
-        let mut matrix = CsrMatrix {
+        let mut matrix: CsrMatrix<u32, i32> = CsrMatrix {
             indices: vec![1, 3],
             indptr: vec![0, 0, 1, 2, 2, 2],
             data: vec![2, 3],
@@ -200,7 +200,7 @@ mod tests {
         //   [0,0,5,0],       // row 3
         //   [0,4,0,1],       // row 4
         // ]
-        let matrix_new = CsrMatrix {
+        let matrix_new: CsrMatrix<u32, i32> = CsrMatrix {
             indices: vec![1, 2, 1, 3],
             indptr: vec![0, 0, 1, 1, 2, 4],
             data: vec![1, 5, 4, 1],
@@ -217,13 +217,13 @@ mod tests {
     #[should_panic(expected = "index out of bounds: the len is 2 but the index is 2")]
     fn test_add_insufficient_size() {
         // Only OOV + row 1 available
-        let matrix = CsrMatrix {
+        let matrix: CsrMatrix<u32, i32> = CsrMatrix {
             indices: vec![1],
             indptr: vec![0, 0, 1],
             data: vec![1],
         };
         // Incoming has OOV + rows 1-2; n_rows=1 is too small
-        let matrix_large = CsrMatrix {
+        let matrix_large: CsrMatrix<u32, i32> = CsrMatrix {
             indices: vec![1, 2],
             indptr: vec![0, 0, 1, 2],
             data: vec![1, 1],
@@ -241,7 +241,7 @@ mod tests {
         //   [0,0,0,1], // row 2
         //   [],        // row 3
         // ]
-        let mut matrix = CsrMatrix {
+        let mut matrix: CsrMatrix<u32, i32> = CsrMatrix {
             indices: vec![3],
             indptr: vec![0, 0, 0, 1, 1],
             data: vec![1],
@@ -255,7 +255,7 @@ mod tests {
         //   [0,0,0,4],    // row 4 (new)
         //   [0,5,0,0],    // row 5 (new)
         // ]
-        let matrix_new = CsrMatrix {
+        let matrix_new: CsrMatrix<u32, i32> = CsrMatrix {
             indices: vec![2, 1, 3, 1],
             indptr: vec![0, 0, 1, 1, 2, 3, 4],
             data: vec![2, 3, 4, 5],

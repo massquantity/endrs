@@ -9,8 +9,8 @@ use rand::prelude::SliceRandom;
 use crate::ordering::SimOrd;
 
 pub(crate) fn get_intersect_neighbors(
-    elem_sims: &[(i32, f32)],
-    elem_labels: &[(i32, f32)],
+    elem_sims: &[(u32, f32)],
+    elem_labels: &[(u32, f32)],
     k_sim: usize,
 ) -> (Vec<f32>, Vec<f32>) {
     let mut i = 0;
@@ -75,21 +75,21 @@ pub(crate) fn compute_pred(
 }
 
 pub(crate) fn get_rec_items(
-    item_sim_scores: FxHashMap<i32, f32>,
+    item_sim_scores: FxHashMap<u32, f32>,
     n_rec: usize,
     random_rec: bool,
-) -> Vec<i32> {
+) -> Vec<u32> {
     if random_rec && item_sim_scores.len() > n_rec {
         let mut rng = &mut rand::thread_rng();
         item_sim_scores
             .keys()
             .copied()
-            .collect::<Vec<i32>>()
+            .collect::<Vec<u32>>()
             .choose_multiple(&mut rng, n_rec)
             .cloned()
             .collect::<Vec<_>>()
     } else {
-        let mut item_preds: Vec<(i32, f32)> = item_sim_scores.into_iter().collect();
+        let mut item_preds: Vec<(u32, f32)> = item_sim_scores.into_iter().collect();
         item_preds.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
         item_preds
             .into_iter()

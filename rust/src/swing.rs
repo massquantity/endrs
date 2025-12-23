@@ -18,10 +18,10 @@ pub struct PySwing {
     n_users: usize,
     n_items: usize,
     graph: Graph,
-    swing_score_mapping: FxHashMap<i32, Vec<(i32, f32)>>,
-    user_interactions: CsrMatrix<i32, f32>,
-    item_interactions: CsrMatrix<i32, f32>,
-    user_consumed: FxHashMap<i32, Vec<i32>>,
+    swing_score_mapping: FxHashMap<u32, Vec<(u32, f32)>>,
+    user_interactions: CsrMatrix<u32, f32>,
+    item_interactions: CsrMatrix<u32, f32>,
+    user_consumed: FxHashMap<u32, Vec<u32>>,
 }
 
 #[pymethods]
@@ -40,7 +40,7 @@ impl PySwing {
 
     #[setter]
     fn set_user_consumed(&mut self, user_consumed: &Bound<'_, PyDict>) -> PyResult<()> {
-        self.user_consumed = user_consumed.extract::<FxHashMap<i32, Vec<i32>>>()?;
+        self.user_consumed = user_consumed.extract::<FxHashMap<u32, Vec<u32>>>()?;
         Ok(())
     }
 
@@ -56,9 +56,9 @@ impl PySwing {
         item_interactions: &Bound<'_, PyAny>,
         user_consumed: &Bound<'_, PyDict>,
     ) -> PyResult<Self> {
-        let user_consumed: FxHashMap<i32, Vec<i32>> = user_consumed.extract()?;
-        let user_interactions: CsrMatrix<i32, f32> = user_interactions.extract()?;
-        let item_interactions: CsrMatrix<i32, f32> = item_interactions.extract()?;
+        let user_consumed: FxHashMap<u32, Vec<u32>> = user_consumed.extract()?;
+        let user_interactions: CsrMatrix<u32, f32> = user_interactions.extract()?;
+        let item_interactions: CsrMatrix<u32, f32> = item_interactions.extract()?;
         let graph = Graph::new(n_users, n_items, alpha, max_cache_num);
 
         Ok(Self {
@@ -97,8 +97,8 @@ impl PySwing {
         item_interactions: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let pool = create_thread_pool(num_threads)?;
-        let new_user_interactions: CsrMatrix<i32, f32> = user_interactions.extract()?;
-        let new_item_interactions: CsrMatrix<i32, f32> = item_interactions.extract()?;
+        let new_user_interactions: CsrMatrix<u32, f32> = user_interactions.extract()?;
+        let new_item_interactions: CsrMatrix<u32, f32> = item_interactions.extract()?;
 
         self.swing_score_mapping = pool.install(|| {
             self.graph.compute_swing_scores(
@@ -140,18 +140,18 @@ impl PySwing {
 
     fn predict(&self, users: &Bound<'_, PyList>, items: &Bound<'_, PyList>) -> PyResult<Vec<f32>> {
         let mut preds = Vec::new();
-        let users: Vec<usize> = users.extract()?;
-        let items: Vec<i32> = items.extract()?;
+        let users: Vec<u32> = users.extract()?;
+        let items: Vec<u32> = items.extract()?;
 
         for (&u, &i) in users.iter().zip(items.iter()) {
-            if u == OOV_IDX || usize::try_from(i)? == OOV_IDX {
+            if u == OOV_IDX || i == OOV_IDX {
                 preds.push(DEFAULT_PRED);
                 continue;
             }
 
             let pred = match (
                 self.swing_score_mapping.get(&i),
-                get_row(&self.user_interactions, u, false),
+                get_row(&self.user_interactions, u as usize, false),
             ) {
                 (Some(item_swings), Some(item_labels)) => {
                     let num = self.top_k.min(item_swings.len());
@@ -159,7 +159,7 @@ impl PySwing {
                     item_swing_scores.clone_from_slice(&item_swings[..num]);
                     item_swing_scores.sort_unstable_by_key(|&(i, _)| i);
 
-                    let item_labels: Vec<(i32, f32)> = item_labels.collect();
+                    let item_labels: Vec<(u32, f32)> = item_labels.collect();
                     let (k_nb_swings, k_nb_labels) =
                         get_intersect_neighbors(&item_swing_scores, &item_labels, self.top_k);
 
@@ -190,17 +190,17 @@ impl PySwing {
         let mut additional_rec_counts = Vec::new();
 
         for u in users {
-            let u: i32 = u.extract()?;
-            let consumed: FxHashSet<i32> = self
+            let u: u32 = u.extract()?;
+            let consumed: FxHashSet<u32> = self
                 .user_consumed
                 .get(&u)
                 .map(|v| FxHashSet::from_iter(v.iter().cloned()))
                 .unwrap_or_default();
 
             let (rec_items, additional_count) =
-                match get_row(&self.user_interactions, usize::try_from(u)?, false) {
+                match get_row(&self.user_interactions, u as usize, false) {
                     Some(row) => {
-                        let mut item_scores: FxHashMap<i32, f32> = FxHashMap::default();
+                        let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
                         for (i, i_label) in row {
                             if let Some(item_swings) = self.swing_score_mapping.get(&i) {
                                 let num = self.top_k.min(item_swings.len());
@@ -260,7 +260,7 @@ mod tests {
     #[pyclass]
     struct PySparseMatrix {
         #[pyo3(get)]
-        sparse_indices: Vec<i32>,
+        sparse_indices: Vec<u32>,
         #[pyo3(get)]
         sparse_indptr: Vec<usize>,
         #[pyo3(get)]
@@ -300,7 +300,7 @@ mod tests {
                 },
             )?;
             let user_consumed = [
-                (1, vec![1, 2, 3, 4]),
+                (1u32, vec![1u32, 2, 3, 4]),
                 (2, vec![1, 2, 4]),
                 (3, vec![1, 3, 4, 5]),
             ]
@@ -326,8 +326,8 @@ mod tests {
     fn test_swing_training() -> Result<(), Box<dyn std::error::Error>> {
         pyo3::prepare_freethreaded_python();
 
-        let test_user_id = 1;
-        let match_item_fn = |model: &PySwing, p: usize, i: i32, s: f32| {
+        let test_user_id = 1u32;
+        let match_item_fn = |model: &PySwing, p: usize, i: u32, s: f32| {
             let (item, score) = model.swing_score_mapping[&test_user_id][p];
             item == i && (score - s).abs() < 1e-10
         };

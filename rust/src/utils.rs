@@ -2,33 +2,33 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::PyResult;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
-pub(crate) const OOV_IDX: usize = 0;
+pub(crate) const OOV_IDX: u32 = 0;
 pub(crate) const DEFAULT_PRED: f32 = 0.0;
 
 #[derive(Debug)]
 pub(crate) struct SimVals {
-    pub(crate) x1: i32,
-    pub(crate) x2: i32,
+    pub(crate) x1: u32,
+    pub(crate) x2: u32,
     pub(crate) prod: f32,
-    pub(crate) count: usize,
+    pub(crate) count: u32,
     pub(crate) cosine: f32,
 }
 
 // (prod, count)
-pub(crate) type CumValues = (f32, usize);
+pub(crate) type CumValues = (f32, u32);
 
-/// Encodes a pair of i32 values into a single u64 key.
+/// Encodes a pair of u32 values into a single u64 key.
 /// x1 is stored in the upper 32 bits, x2 in the lower 32 bits.
 #[inline]
-pub(crate) fn encode_pair(x1: i32, x2: i32) -> u64 {
+pub(crate) fn encode_pair(x1: u32, x2: u32) -> u64 {
     ((x1 as u64) << 32) | (x2 as u64)
 }
 
-/// Decodes a u64 key back into a pair of usize values.
+/// Decodes a u64 key back into a pair of u32 values.
 #[inline]
-pub(crate) fn decode_pair(key: u64) -> (usize, usize) {
-    let x1 = (key >> 32) as usize;
-    let x2 = (key & 0xFFFFFFFF) as usize;
+pub(crate) fn decode_pair(key: u64) -> (u32, u32) {
+    let x1 = (key >> 32) as u32;
+    let x2 = (key & 0xFFFFFFFF) as u32;
     (x1, x2)
 }
 
