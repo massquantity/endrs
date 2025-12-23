@@ -25,6 +25,21 @@ pub(crate) fn update_sum_squares(
     }
 }
 
+/// Incrementally update cosine similarities with new interaction data.
+///
+/// Similar to `invert_cosine`, but accumulates new statistics into existing `cum_values`
+/// rather than replacing them. Used for incremental/online learning scenarios where
+/// new interactions arrive over time.
+///
+/// # Arguments
+/// * `interactions` - CSR matrix containing only the new interactions
+/// * `sum_squares` - Updated sum of squared values for each column
+/// * `cum_values` - Existing statistics map to be updated in-place
+/// * `n` - Number of columns (excluding OOV index 0)
+/// * `min_common` - Minimum cumulative co-occurrence count to include in results
+///
+/// # Returns
+/// Vector of (col1, col2, cosine_similarity) tuples with updated similarities
 pub(crate) fn update_cosine(
     interactions: &CsrMatrix<u32, f32>,
     sum_squares: &[f32],
@@ -65,6 +80,22 @@ pub(crate) fn update_cosine(
     Ok(cosine_sims)
 }
 
+/// Incrementally update sorted neighbor lists with new similarity scores.
+///
+/// Merges new similarity pairs into existing `sim_mapping`, replacing old similarities
+/// for the same neighbor and re-sorting. Used after `update_cosine` to maintain
+/// sorted neighbor lists in incremental learning.
+///
+/// # Arguments
+/// * `n` - Number of nodes (excluding OOV index 0)
+/// * `cosine_sims` - New (node1, node2, similarity) tuples to merge
+/// * `sim_mapping` - Existing neighbor mapping to update in-place
+///
+/// # Process
+/// 1. Aggregate new similarities by node (bidirectional)
+/// 2. For each node with new neighbors, merge with existing neighbors
+/// 3. New similarities override old ones for the same neighbor pair
+/// 4. Re-sort combined list by similarity (descending)
 pub(crate) fn update_by_sims(
     n: usize,
     cosine_sims: &[(u32, u32, f32)],

@@ -73,6 +73,21 @@ fn compute_row_sims(
     sims
 }
 
+/// Compute cosine similarities using the forward iteration approach.
+///
+/// This method directly iterates over all row pairs (x1, x2) where x1 < x2, computing
+/// their dot product via sorted merge. More efficient when the number of rows is
+/// smaller than columns (e.g., fewer items than users in UserCF).
+///
+/// # Arguments
+/// * `interactions` - CSR matrix where rows are the entities to compare
+/// * `sum_squares` - Precomputed sum of squared values for each row
+/// * `cum_values` - Output map storing (dot_product, co_occurrence_count) for each pair
+/// * `n` - Number of rows (excluding OOV index 0)
+/// * `min_common` - Minimum co-occurrence count to include a pair in results
+///
+/// # Returns
+/// Vector of (row1, row2, cosine_similarity) tuples meeting the min_common threshold
 pub(crate) fn forward_cosine(
     interactions: &CsrMatrix<u32, f32>,
     sum_squares: &[f32],
@@ -166,6 +181,18 @@ fn process_row_batched(acc: &mut FxHashMap<u64, CumValues>, row_indices: &[u32],
     }
 }
 
+/// Compute pairwise co-occurrence statistics across all rows in parallel.
+///
+/// For each row, enumerates all column pairs and accumulates their dot product
+/// contributions and co-occurrence counts. Uses parallel fold-reduce pattern
+/// for efficient multi-threaded aggregation.
+///
+/// # Arguments
+/// * `interactions` - CSR matrix to process
+/// * `n` - Number of rows to iterate (excluding OOV index 0)
+///
+/// # Returns
+/// HashMap where key is encoded (col1, col2) pair and value is (dot_product, count)
 pub(crate) fn compute_pair_stats(
     interactions: &CsrMatrix<u32, f32>,
     n: usize,
@@ -198,6 +225,21 @@ pub(crate) fn compute_pair_stats(
         })
 }
 
+/// Compute cosine similarities using the inverted index approach.
+///
+/// This method iterates over rows (e.g., users) and accumulates co-occurrence statistics
+/// for column pairs (e.g., items) that appear together. More efficient when the number
+/// of rows is smaller than columns (e.g., fewer users than items in ItemCF).
+///
+/// # Arguments
+/// * `interactions` - CSR matrix where rows are the iteration dimension
+/// * `sum_squares` - Precomputed sum of squared values for each column
+/// * `cum_values` - Output map storing (dot_product, co_occurrence_count) for each pair
+/// * `n` - Number of columns (excluding OOV index 0)
+/// * `min_common` - Minimum co-occurrence count to include a pair in results
+///
+/// # Returns
+/// Vector of (col1, col2, cosine_similarity) tuples meeting the min_common threshold
 pub(crate) fn invert_cosine(
     interactions: &CsrMatrix<u32, f32>,
     sum_squares: &[f32],
@@ -229,6 +271,20 @@ pub(crate) fn invert_cosine(
     Ok(cosine_sims)
 }
 
+/// Aggregate and sort similarity pairs into per-node neighbor lists.
+///
+/// This function takes pairwise similarity scores and builds a mapping where each node
+/// has its neighbors sorted by similarity in descending order.
+///
+/// # Arguments
+/// * `n` - The number of nodes (excluding OOV index 0)
+/// * `cosine_sims` - Slice of (node1, node2, similarity) tuples
+/// * `sim_mapping` - Output map: node_id -> (sorted_neighbor_ids, sorted_similarities)
+///
+/// # Process
+/// 1. Aggregate: For each pair (x1, x2, sim), add x2 to x1's neighbors and vice versa
+/// 2. Sort: Sort each node's neighbors by similarity (descending)
+/// 3. Store: Split into separate vectors for neighbor IDs and similarity values
 pub(crate) fn sort_by_sims(
     n: usize,
     cosine_sims: &[(u32, u32, f32)],
