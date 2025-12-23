@@ -112,12 +112,12 @@ impl PySwing {
         self.user_interactions = CsrMatrix::merge(
             &self.user_interactions,
             &new_user_interactions,
-            Some(self.n_users + 1),
+            self.n_users,
         );
         self.item_interactions = CsrMatrix::merge(
             &self.item_interactions,
             &new_item_interactions,
-            Some(self.n_items + 1),
+            self.n_items,
         );
         Ok(())
     }
