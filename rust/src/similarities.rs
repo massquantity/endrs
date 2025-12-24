@@ -6,7 +6,7 @@ use pyo3::PyResult;
 use rayon::prelude::*;
 
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{decode_pair, encode_pair, CumValues, SimVals};
+use crate::utils::{decode_pair, encode_pair, CumValues, Neighbor, SimVals, OOV_IDX};
 
 const BATCH_SIZE: usize = 1000;
 
@@ -235,7 +235,7 @@ pub(crate) fn compute_pair_stats(
 /// * `interactions` - CSR matrix where rows are the iteration dimension
 /// * `sum_squares` - Precomputed sum of squared values for each column
 /// * `cum_values` - Output map storing (dot_product, co_occurrence_count) for each pair
-/// * `n` - Number of columns (excluding OOV index 0)
+/// * `n` - Number of rows (excluding OOV index 0)
 /// * `min_common` - Minimum co-occurrence count to include a pair in results
 ///
 /// # Returns
@@ -271,46 +271,62 @@ pub(crate) fn invert_cosine(
     Ok(cosine_sims)
 }
 
+/// Aggregate similarity pairs into per-node neighbor lists.
+pub(crate) fn aggregate_sims(cosine_sims: &[(u32, u32, f32)]) -> FxHashMap<u32, Vec<(u32, f32)>> {
+    let mut agg_sims: FxHashMap<u32, Vec<(u32, f32)>> = FxHashMap::default();
+    for &(x1, x2, sim) in cosine_sims {
+        // Skip pairs containing OOV_IDX
+        if x1 == OOV_IDX || x2 == OOV_IDX {
+            continue;
+        }
+        agg_sims.entry(x1).or_default().push((x2, sim));
+        agg_sims.entry(x2).or_default().push((x1, sim));
+    }
+    agg_sims
+}
+
+/// Sort neighbor similarities and insert into the map as Neighbor structs.
+///
+/// This is a common operation used by both `sort_by_sims` and `update_by_sims`:
+/// 1. Sort the neighbor similarities in descending order
+/// 2. Convert to Neighbor structs
+/// 3. Insert into the map
+pub(crate) fn insert_sorted_neighbors(
+    sims: &mut FxHashMap<u32, Vec<Neighbor>>,
+    key: u32,
+    mut neighbor_sims: Vec<(u32, f32)>,
+) {
+    neighbor_sims.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+
+    let neighbors: Vec<Neighbor> = neighbor_sims
+        .into_iter()
+        .map(|(id, sim)| Neighbor { id, sim })
+        .collect();
+
+    sims.insert(key, neighbors);
+}
+
 /// Aggregate and sort similarity pairs into per-node neighbor lists.
 ///
 /// This function takes pairwise similarity scores and builds a mapping where each node
 /// has its neighbors sorted by similarity in descending order.
 ///
 /// # Arguments
-/// * `n` - The number of nodes (excluding OOV index 0)
 /// * `cosine_sims` - Slice of (node1, node2, similarity) tuples
-/// * `sim_mapping` - Output map: node_id -> (sorted_neighbor_ids, sorted_similarities)
+/// * `sims` - Output map: node_id -> sorted neighbors (id + similarity)
 ///
 /// # Process
 /// 1. Aggregate: For each pair (x1, x2, sim), add x2 to x1's neighbors and vice versa
 /// 2. Sort: Sort each node's neighbors by similarity (descending)
-/// 3. Store: Split into separate vectors for neighbor IDs and similarity values
+/// 3. Store: Convert to Neighbor structs and insert into the map
 pub(crate) fn sort_by_sims(
-    n: usize,
     cosine_sims: &[(u32, u32, f32)],
-    sim_mapping: &mut FxHashMap<u32, (Vec<u32>, Vec<f32>)>,
+    sims: &mut FxHashMap<u32, Vec<Neighbor>>,
 ) -> PyResult<()> {
     let start = Instant::now();
-    let mut agg_sims: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n + 1];
-
-    for &(x1, x2, sim) in cosine_sims {
-        agg_sims[x1 as usize].push((x2, sim));
-        agg_sims[x2 as usize].push((x1, sim));
-    }
-
-    for (i, neighbor_sims) in agg_sims.iter_mut().enumerate().skip(1) {
-        if neighbor_sims.is_empty() {
-            continue;
-        }
-
-        neighbor_sims.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
-
-        let (neighbors, sims) = neighbor_sims
-            .iter()
-            .map(|(n, s)| (*n, *s))
-            .unzip();
-
-        sim_mapping.insert(i as u32, (neighbors, sims));
+    let agg_sims = aggregate_sims(cosine_sims);
+    for (key, neighbor_sims) in agg_sims {
+        insert_sorted_neighbors(sims, key, neighbor_sims);
     }
 
     let duration = start.elapsed();

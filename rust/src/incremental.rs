@@ -3,9 +3,11 @@ use std::time::Instant;
 use fxhash::FxHashMap;
 use pyo3::PyResult;
 
-use crate::similarities::{compute_cosine, compute_pair_stats};
+use crate::similarities::{
+    aggregate_sims, compute_cosine, compute_pair_stats, insert_sorted_neighbors,
+};
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{decode_pair, CumValues};
+use crate::utils::{decode_pair, CumValues, Neighbor};
 
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn update_sum_squares(
@@ -82,14 +84,13 @@ pub(crate) fn update_cosine(
 
 /// Incrementally update sorted neighbor lists with new similarity scores.
 ///
-/// Merges new similarity pairs into existing `sim_mapping`, replacing old similarities
+/// Merges new similarity pairs into existing neighbor lists, replacing old similarities
 /// for the same neighbor and re-sorting. Used after `update_cosine` to maintain
 /// sorted neighbor lists in incremental learning.
 ///
 /// # Arguments
-/// * `n` - Number of nodes (excluding OOV index 0)
 /// * `cosine_sims` - New (node1, node2, similarity) tuples to merge
-/// * `sim_mapping` - Existing neighbor mapping to update in-place
+/// * `sims` - Existing neighbor mapping to update in-place
 ///
 /// # Process
 /// 1. Aggregate new similarities by node (bidirectional)
@@ -97,35 +98,27 @@ pub(crate) fn update_cosine(
 /// 3. New similarities override old ones for the same neighbor pair
 /// 4. Re-sort combined list by similarity (descending)
 pub(crate) fn update_by_sims(
-    n: usize,
     cosine_sims: &[(u32, u32, f32)],
-    sim_mapping: &mut FxHashMap<u32, (Vec<u32>, Vec<f32>)>,
+    sims: &mut FxHashMap<u32, Vec<Neighbor>>,
 ) -> PyResult<()> {
     let start = Instant::now();
-    let mut agg_sims: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n + 1];
+    let agg_sims = aggregate_sims(cosine_sims);
 
-    for &(x1, x2, sim) in cosine_sims {
-        agg_sims[x1 as usize].push((x2, sim));
-        agg_sims[x2 as usize].push((x1, sim));
-    }
-
-    for (i, new_neighbor_sims) in agg_sims.into_iter().enumerate().skip(1) {
-        if new_neighbor_sims.is_empty() {
-            continue;
-        }
-
-        let key = i as u32;
-        let mut combined_sims: Vec<(u32, f32)> = if let Some((n, s)) = sim_mapping.get(&key) {
-            let pairs = n.iter().zip(s.iter()).map(|(a, b)| (*a, *b));
-            let mut original_sims: FxHashMap<u32, f32> = FxHashMap::from_iter(pairs);
-            original_sims.extend(new_neighbor_sims); // replace old sims with new ones in map
-            original_sims.into_iter().collect()
-        } else {
-            new_neighbor_sims
+    for (key, new_neighbor_sims) in agg_sims {
+        // Use remove instead of get to avoid extra copy
+        let combined_sims = match sims.remove(&key) {
+            Some(neighbors) => {
+                let mut original: FxHashMap<u32, f32> = neighbors
+                    .into_iter()
+                    .map(|n| (n.id, n.sim))
+                    .collect();
+                original.extend(new_neighbor_sims);
+                original.into_iter().collect()
+            }
+            None => new_neighbor_sims,
         };
 
-        combined_sims.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
-        sim_mapping.insert(key, combined_sims.into_iter().unzip());
+        insert_sorted_neighbors(sims, key, combined_sims);
     }
 
     let duration = start.elapsed();
