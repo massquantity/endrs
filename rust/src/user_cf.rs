@@ -8,7 +8,7 @@ use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
 use crate::serialization::{load_model, save_model};
 use crate::similarities::{compute_sum_squares, forward_cosine, invert_cosine, sort_by_sims};
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{create_thread_pool, CumValues, DEFAULT_PRED, OOV_IDX};
+use crate::utils::{create_thread_pool, CumValues, Neighbor, DEFAULT_PRED, OOV_IDX};
 
 #[pyclass(module = "recfarm", name = "UserCF")]
 #[derive(Serialize, Deserialize)]
@@ -20,7 +20,7 @@ pub struct PyUserCF {
     min_common: u32,
     sum_squares: Vec<f32>,
     cum_values: FxHashMap<u64, CumValues>,
-    sim_mapping: FxHashMap<u32, (Vec<u32>, Vec<f32>)>,
+    user_sims: FxHashMap<u32, Vec<Neighbor>>,
     user_interactions: CsrMatrix<u32, f32>,
     item_interactions: CsrMatrix<u32, f32>,
     user_consumed: FxHashMap<u32, Vec<u32>>,
@@ -67,7 +67,7 @@ impl PyUserCF {
             min_common,
             sum_squares: Vec::new(),
             cum_values: FxHashMap::default(),
-            sim_mapping: FxHashMap::default(),
+            user_sims: FxHashMap::default(),
             user_interactions,
             item_interactions,
             user_consumed,
@@ -78,6 +78,7 @@ impl PyUserCF {
     /// invert index: sparse matrix of `item` interaction
     fn compute_similarities(&mut self, invert: bool, num_threads: usize) -> PyResult<()> {
         self.sum_squares = compute_sum_squares(&self.user_interactions, self.n_users);
+
         let cosine_sims = if invert {
             invert_cosine(
                 &self.item_interactions,
@@ -98,7 +99,9 @@ impl PyUserCF {
                 )
             })?
         };
-        sort_by_sims(self.n_users, &cosine_sims, &mut self.sim_mapping)?;
+
+        sort_by_sims(&cosine_sims, &mut self.user_sims)?;
+
         Ok(())
     }
 
@@ -121,7 +124,7 @@ impl PyUserCF {
             self.min_common,
         )?;
 
-        update_by_sims(self.n_users, &cosine_sims, &mut self.sim_mapping)?;
+        update_by_sims(&cosine_sims, &mut self.user_sims)?;
 
         // merge interactions for inference on new users/items
         self.user_interactions = CsrMatrix::merge(
@@ -134,11 +137,12 @@ impl PyUserCF {
             &new_item_interactions,
             self.n_items,
         );
+
         Ok(())
     }
 
     fn num_sim_elements(&self) -> PyResult<usize> {
-        let n_elements = self.sim_mapping.values().map(|i| i.0.len()).sum();
+        let n_elements = self.user_sims.values().map(|v| v.len()).sum();
         Ok(n_elements)
     }
 
@@ -152,21 +156,24 @@ impl PyUserCF {
                 preds.push(DEFAULT_PRED);
                 continue;
             }
+
             let pred = match (
-                self.sim_mapping.get(&u),
+                self.user_sims.get(&u),
                 get_row(&self.item_interactions, i as usize, false),
             ) {
-                (Some((sim_users, sim_values)), Some(user_labels)) => {
-                    let sim_num = std::cmp::min(self.k_sim, sim_users.len());
-                    let mut user_sims: Vec<(u32, f32)> = sim_users[..sim_num]
+                (Some(neighbors), Some(user_labels)) => {
+                    let sim_num = std::cmp::min(self.k_sim, neighbors.len());
+                    let mut nb_sims: Vec<(u32, f32)> = neighbors[..sim_num]
                         .iter()
-                        .zip(sim_values[..sim_num].iter())
-                        .map(|(u, s)| (*u, *s))
+                        .map(|n| (n.id, n.sim))
                         .collect();
-                    user_sims.sort_unstable_by_key(|&(u, _)| u);
+
+                    nb_sims.sort_unstable_by_key(|&(u, _)| u);
+
                     let user_labels: Vec<(u32, f32)> = user_labels.collect();
                     let (k_nb_sims, k_nb_labels) =
-                        get_intersect_neighbors(&user_sims, &user_labels, self.k_sim);
+                        get_intersect_neighbors(&nb_sims, &user_labels, self.k_sim);
+
                     if k_nb_sims.is_empty() {
                         DEFAULT_PRED
                     } else {
@@ -175,6 +182,7 @@ impl PyUserCF {
                 }
                 _ => DEFAULT_PRED,
             };
+
             preds.push(pred);
         }
         Ok(preds)
@@ -198,18 +206,18 @@ impl PyUserCF {
                 .get(&u)
                 .map_or(FxHashSet::default(), FxHashSet::from_iter);
 
-            if let Some((sim_users, sim_values)) = self.sim_mapping.get(&u) {
+            if let Some(neighbors) = self.user_sims.get(&u) {
                 let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
-                let sim_num = std::cmp::min(self.k_sim, sim_users.len());
-                for (&v, &u_v_sim) in sim_users[..sim_num]
-                    .iter()
-                    .zip(sim_values[..sim_num].iter())
-                {
+                let sim_num = std::cmp::min(self.k_sim, neighbors.len());
+                for nb in &neighbors[..sim_num] {
+                    let v = nb.id;
+                    let u_v_sim = nb.sim;
                     if let Some(row) = get_row(&self.user_interactions, v as usize, false) {
                         for (i, v_i_score) in row {
                             if filter_consumed && consumed.contains(&i) {
                                 continue;
                             }
+
                             item_scores
                                 .entry(i)
                                 .and_modify(|score| *score += u_v_sim * v_i_score)
@@ -223,6 +231,7 @@ impl PyUserCF {
                     no_rec_indices.push(k);
                     continue;
                 }
+
                 let items = get_rec_items(item_scores, n_rec, random_rec);
                 recs.push(PyList::new(py, items)?);
             } else {
@@ -324,7 +333,9 @@ mod tests {
 
     #[test]
     fn test_user_cf_training() -> Result<(), Box<dyn std::error::Error>> {
-        let get_nbs = |model: &PyUserCF, u: u32| model.sim_mapping[&u].0.to_owned();
+        let get_nbs = |model: &PyUserCF, u: u32| -> Vec<u32> {
+            model.user_sims[&u].iter().map(|n| n.id).collect()
+        };
         pyo3::prepare_freethreaded_python();
         let user_cf = get_user_cf()?;
         assert_eq!(get_nbs(&user_cf, 1), vec![2, 4, 3, 5]);
@@ -337,7 +348,9 @@ mod tests {
 
     #[test]
     fn test_user_cf_incremental_training() -> Result<(), Box<dyn std::error::Error>> {
-        let get_nbs = |model: &PyUserCF, u: u32| model.sim_mapping[&u].0.to_owned();
+        let get_nbs = |model: &PyUserCF, u: u32| -> Vec<u32> {
+            model.user_sims[&u].iter().map(|n| n.id).collect()
+        };
         pyo3::prepare_freethreaded_python();
         let mut user_cf = get_user_cf()?;
         Python::with_gil(|py| -> PyResult<()> {

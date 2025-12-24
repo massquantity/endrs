@@ -1,21 +1,28 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::PyResult;
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use serde::{Deserialize, Serialize};
 
 pub(crate) const OOV_IDX: u32 = 0;
 pub(crate) const DEFAULT_PRED: f32 = 0.0;
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Neighbor {
+    pub id: u32,
+    pub sim: f32,
+}
+
 #[derive(Debug)]
-pub(crate) struct SimVals {
-    pub(crate) x1: u32,
-    pub(crate) x2: u32,
-    pub(crate) prod: f32,
-    pub(crate) count: u32,
-    pub(crate) cosine: f32,
+pub struct SimVals {
+    pub x1: u32,
+    pub x2: u32,
+    pub prod: f32,
+    pub count: u32,
+    pub cosine: f32,
 }
 
 // (prod, count)
-pub(crate) type CumValues = (f32, u32);
+pub type CumValues = (f32, u32);
 
 /// Encodes a pair of u32 values into a single u64 key.
 /// x1 is stored in the upper 32 bits, x2 in the lower 32 bits.

@@ -8,7 +8,7 @@ use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
 use crate::serialization::{load_model, save_model};
 use crate::similarities::{compute_sum_squares, forward_cosine, invert_cosine, sort_by_sims};
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{create_thread_pool, CumValues, DEFAULT_PRED, OOV_IDX};
+use crate::utils::{create_thread_pool, CumValues, Neighbor, DEFAULT_PRED, OOV_IDX};
 
 #[pyclass(module = "recfarm", name = "ItemCF")]
 #[derive(Serialize, Deserialize)]
@@ -20,7 +20,7 @@ pub struct PyItemCF {
     min_common: u32,
     sum_squares: Vec<f32>,
     cum_values: FxHashMap<u64, CumValues>,
-    sim_mapping: FxHashMap<u32, (Vec<u32>, Vec<f32>)>,
+    item_sims: FxHashMap<u32, Vec<Neighbor>>,
     user_interactions: CsrMatrix<u32, f32>,
     item_interactions: CsrMatrix<u32, f32>,
     user_consumed: FxHashMap<u32, Vec<u32>>,
@@ -67,7 +67,7 @@ impl PyItemCF {
             min_common,
             sum_squares: Vec::new(),
             cum_values: FxHashMap::default(),
-            sim_mapping: FxHashMap::default(),
+            item_sims: FxHashMap::default(),
             user_interactions,
             item_interactions,
             user_consumed,
@@ -78,6 +78,7 @@ impl PyItemCF {
     /// invert index: sparse matrix of `user` interactions
     fn compute_similarities(&mut self, invert: bool, num_threads: usize) -> PyResult<()> {
         self.sum_squares = compute_sum_squares(&self.item_interactions, self.n_items);
+
         let cosine_sims = if invert {
             invert_cosine(
                 &self.user_interactions,
@@ -98,7 +99,9 @@ impl PyItemCF {
                 )
             })?
         };
-        sort_by_sims(self.n_items, &cosine_sims, &mut self.sim_mapping)?;
+
+        sort_by_sims(&cosine_sims, &mut self.item_sims)?;
+
         Ok(())
     }
 
@@ -121,7 +124,7 @@ impl PyItemCF {
             self.min_common,
         )?;
 
-        update_by_sims(self.n_items, &cosine_sims, &mut self.sim_mapping)?;
+        update_by_sims(&cosine_sims, &mut self.item_sims)?;
 
         // merge interactions for inference on new users/items
         self.user_interactions = CsrMatrix::merge(
@@ -134,16 +137,12 @@ impl PyItemCF {
             &new_item_interactions,
             self.n_items,
         );
+
         Ok(())
     }
 
     fn num_sim_elements(&self) -> PyResult<usize> {
-        if self.sim_mapping.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "call `compute_similarities` first",
-            ));
-        }
-        let n_elements = self.sim_mapping.values().map(|i| i.0.len()).sum();
+        let n_elements = self.item_sims.values().map(|v| v.len()).sum();
         Ok(n_elements)
     }
 
@@ -157,21 +156,24 @@ impl PyItemCF {
                 preds.push(DEFAULT_PRED);
                 continue;
             }
+
             let pred = match (
-                self.sim_mapping.get(&i),
+                self.item_sims.get(&i),
                 get_row(&self.user_interactions, u as usize, false),
             ) {
-                (Some((sim_items, sim_values)), Some(item_labels)) => {
-                    let sim_num = std::cmp::min(self.k_sim, sim_items.len());
-                    let mut item_sims: Vec<(u32, f32)> = sim_items[..sim_num]
+                (Some(neighbors), Some(item_labels)) => {
+                    let sim_num = std::cmp::min(self.k_sim, neighbors.len());
+                    let mut nb_sims: Vec<(u32, f32)> = neighbors[..sim_num]
                         .iter()
-                        .zip(sim_values[..sim_num].iter())
-                        .map(|(i, s)| (*i, *s))
+                        .map(|n| (n.id, n.sim))
                         .collect();
-                    item_sims.sort_unstable_by_key(|&(i, _)| i);
+
+                    nb_sims.sort_unstable_by_key(|&(i, _)| i);
+
                     let item_labels: Vec<(u32, f32)> = item_labels.collect();
                     let (k_nb_sims, k_nb_labels) =
-                        get_intersect_neighbors(&item_sims, &item_labels, self.k_sim);
+                        get_intersect_neighbors(&nb_sims, &item_labels, self.k_sim);
+
                     if k_nb_sims.is_empty() {
                         DEFAULT_PRED
                     } else {
@@ -180,6 +182,7 @@ impl PyItemCF {
                 }
                 _ => DEFAULT_PRED,
             };
+
             preds.push(pred);
         }
         Ok(preds)
@@ -203,38 +206,37 @@ impl PyItemCF {
                 .get(&u)
                 .map_or(FxHashSet::default(), FxHashSet::from_iter);
 
-            match get_row(&self.user_interactions, u as usize, false) {
-                Some(row) => {
-                    let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
-                    for (i, i_label) in row {
-                        if let Some((sim_items, sim_values)) = self.sim_mapping.get(&i) {
-                            let sim_num = std::cmp::min(self.k_sim, sim_items.len());
-                            for (&j, &i_j_sim) in sim_items[..sim_num]
-                                .iter()
-                                .zip(sim_values[..sim_num].iter())
-                            {
-                                if filter_consumed && consumed.contains(&j) {
-                                    continue;
-                                }
-                                item_scores
-                                    .entry(j)
-                                    .and_modify(|score| *score += i_j_sim * i_label)
-                                    .or_insert(i_j_sim * i_label);
+            if let Some(row) = get_row(&self.user_interactions, u as usize, false) {
+                let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
+                for (i, i_label) in row {
+                    if let Some(neighbors) = self.item_sims.get(&i) {
+                        let sim_num = std::cmp::min(self.k_sim, neighbors.len());
+                        for nb in &neighbors[..sim_num] {
+                            let j = nb.id;
+                            let i_j_sim = nb.sim;
+                            if filter_consumed && consumed.contains(&j) {
+                                continue;
                             }
+
+                            item_scores
+                                .entry(j)
+                                .and_modify(|score| *score += i_j_sim * i_label)
+                                .or_insert(i_j_sim * i_label);
                         }
                     }
-                    if item_scores.is_empty() {
-                        recs.push(PyList::empty(py));
-                        no_rec_indices.push(k);
-                    } else {
-                        let items = get_rec_items(item_scores, n_rec, random_rec);
-                        recs.push(PyList::new(py, items)?);
-                    }
                 }
-                None => {
+
+                if item_scores.is_empty() {
                     recs.push(PyList::empty(py));
                     no_rec_indices.push(k);
+                    continue;
                 }
+
+                let items = get_rec_items(item_scores, n_rec, random_rec);
+                recs.push(PyList::new(py, items)?);
+            } else {
+                recs.push(PyList::empty(py));
+                no_rec_indices.push(k);
             }
         }
 
@@ -331,7 +333,9 @@ mod tests {
 
     #[test]
     fn test_item_cf_training() -> Result<(), Box<dyn std::error::Error>> {
-        let get_nbs = |model: &PyItemCF, i: u32| model.sim_mapping[&i].0.to_owned();
+        let get_nbs = |model: &PyItemCF, i: u32| -> Vec<u32> {
+            model.item_sims[&i].iter().map(|n| n.id).collect()
+        };
         pyo3::prepare_freethreaded_python();
         let item_cf = get_item_cf()?;
         assert_eq!(get_nbs(&item_cf, 1), vec![2, 4, 3, 5]);
@@ -344,7 +348,9 @@ mod tests {
 
     #[test]
     fn test_item_cf_incremental_training() -> Result<(), Box<dyn std::error::Error>> {
-        let get_nbs = |model: &PyItemCF, u: u32| model.sim_mapping[&u].0.to_owned();
+        let get_nbs = |model: &PyItemCF, u: u32| -> Vec<u32> {
+            model.item_sims[&u].iter().map(|n| n.id).collect()
+        };
         pyo3::prepare_freethreaded_python();
         let mut item_cf = get_item_cf()?;
         Python::with_gil(|py| -> PyResult<()> {
