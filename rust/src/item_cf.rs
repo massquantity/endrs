@@ -198,50 +198,52 @@ impl PyItemCF {
         random_rec: bool,
     ) -> PyResult<(Vec<Bound<'py, PyList>>, Bound<'py, PyList>)> {
         let mut recs = Vec::new();
-        let mut no_rec_indices = Vec::new();
-        for (k, u) in users.iter().enumerate() {
+        let mut additional_rec_counts = Vec::new();
+        for u in users {
             let u: u32 = u.extract()?;
             let consumed = self
                 .user_consumed
                 .get(&u)
                 .map_or(FxHashSet::default(), FxHashSet::from_iter);
 
-            if let Some(row) = get_row(&self.user_interactions, u as usize, false) {
-                let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
-                for (i, i_label) in row {
-                    if let Some(neighbors) = self.item_sims.get(&i) {
-                        let sim_num = std::cmp::min(self.k_sim, neighbors.len());
-                        for nb in &neighbors[..sim_num] {
-                            let j = nb.id;
-                            let i_j_sim = nb.sim;
-                            if filter_consumed && consumed.contains(&j) {
-                                continue;
-                            }
+            let (rec_items, additional_count) =
+                if let Some(row) = get_row(&self.user_interactions, u as usize, false) {
+                    let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
+                    for (i, i_label) in row {
+                        if let Some(neighbors) = self.item_sims.get(&i) {
+                            let sim_num = std::cmp::min(self.k_sim, neighbors.len());
+                            for nb in &neighbors[..sim_num] {
+                                let j = nb.id;
+                                let i_j_sim = nb.sim;
+                                if filter_consumed && consumed.contains(&j) {
+                                    continue;
+                                }
 
-                            item_scores
-                                .entry(j)
-                                .and_modify(|score| *score += i_j_sim * i_label)
-                                .or_insert(i_j_sim * i_label);
+                                item_scores
+                                    .entry(j)
+                                    .and_modify(|score| *score += i_j_sim * i_label)
+                                    .or_insert(i_j_sim * i_label);
+                            }
                         }
                     }
-                }
 
-                if item_scores.is_empty() {
-                    recs.push(PyList::empty(py));
-                    no_rec_indices.push(k);
-                    continue;
-                }
+                    if item_scores.is_empty() {
+                        (PyList::empty(py), n_rec)
+                    } else {
+                        let items = get_rec_items(item_scores, n_rec, random_rec);
+                        let additional = n_rec - items.len();
+                        (PyList::new(py, items)?, additional)
+                    }
+                } else {
+                    (PyList::empty(py), n_rec)
+                };
 
-                let items = get_rec_items(item_scores, n_rec, random_rec);
-                recs.push(PyList::new(py, items)?);
-            } else {
-                recs.push(PyList::empty(py));
-                no_rec_indices.push(k);
-            }
+            recs.push(rec_items);
+            additional_rec_counts.push(additional_count);
         }
 
-        let no_rec_indices = PyList::new(py, no_rec_indices)?;
-        Ok((recs, no_rec_indices))
+        let additional_rec_counts = PyList::new(py, additional_rec_counts)?;
+        Ok((recs, additional_rec_counts))
     }
 }
 

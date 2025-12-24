@@ -198,34 +198,33 @@ impl PySwing {
                 .unwrap_or_default();
 
             let (rec_items, additional_count) =
-                match get_row(&self.user_interactions, u as usize, false) {
-                    Some(row) => {
-                        let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
-                        for (i, i_label) in row {
-                            if let Some(item_swings) = self.swing_score_mapping.get(&i) {
-                                let num = self.top_k.min(item_swings.len());
-                                for &(j, i_j_swing_score) in &item_swings[..num] {
-                                    if filter_consumed && consumed.contains(&j) {
-                                        continue;
-                                    }
-
-                                    item_scores
-                                        .entry(j)
-                                        .and_modify(|score| *score += i_j_swing_score * i_label)
-                                        .or_insert(i_j_swing_score * i_label);
+                if let Some(row) = get_row(&self.user_interactions, u as usize, false) {
+                    let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
+                    for (i, i_label) in row {
+                        if let Some(item_swings) = self.swing_score_mapping.get(&i) {
+                            let num = self.top_k.min(item_swings.len());
+                            for &(j, i_j_swing_score) in &item_swings[..num] {
+                                if filter_consumed && consumed.contains(&j) {
+                                    continue;
                                 }
+
+                                item_scores
+                                    .entry(j)
+                                    .and_modify(|score| *score += i_j_swing_score * i_label)
+                                    .or_insert(i_j_swing_score * i_label);
                             }
                         }
-
-                        if item_scores.is_empty() {
-                            (PyList::empty(py), n_rec)
-                        } else {
-                            let items = get_rec_items(item_scores, n_rec, random_rec);
-                            let additional = n_rec - items.len();
-                            (PyList::new(py, items)?, additional)
-                        }
                     }
-                    None => (PyList::empty(py), n_rec),
+
+                    if item_scores.is_empty() {
+                        (PyList::empty(py), n_rec)
+                    } else {
+                        let items = get_rec_items(item_scores, n_rec, random_rec);
+                        let additional = n_rec - items.len();
+                        (PyList::new(py, items)?, additional)
+                    }
+                } else {
+                    (PyList::empty(py), n_rec)
                 };
 
             recs.push(rec_items);
