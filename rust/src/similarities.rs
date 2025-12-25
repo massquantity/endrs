@@ -6,7 +6,9 @@ use pyo3::PyResult;
 use rayon::prelude::*;
 
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{decode_pair, encode_pair, CumValues, Neighbor, SimVals, OOV_IDX};
+use crate::utils::{
+    create_thread_pool, decode_pair, encode_pair, CumValues, Neighbor, SimVals, OOV_IDX,
+};
 
 const BATCH_SIZE: usize = 1000;
 
@@ -85,6 +87,7 @@ fn compute_row_sims(
 /// * `cum_values` - Output map storing (dot_product, co_occurrence_count) for each pair
 /// * `n` - Number of rows (excluding OOV index 0)
 /// * `min_common` - Minimum co-occurrence count to include a pair in results
+/// * `num_threads` - Number of threads to use for parallel computation
 ///
 /// # Returns
 /// Vector of (row1, row2, cosine_similarity) tuples meeting the min_common threshold
@@ -94,12 +97,16 @@ pub(crate) fn forward_cosine(
     cum_values: &mut FxHashMap<u64, CumValues>,
     n: usize,
     min_common: u32,
+    num_threads: usize,
 ) -> PyResult<Vec<(u32, u32, f32)>> {
     let start = Instant::now();
-    let sim_vals: Vec<SimVals> = (1..=n)
-        .into_par_iter()
-        .flat_map(|x| compute_row_sims(interactions, sum_squares, n, x))
-        .collect();
+    let pool = create_thread_pool(num_threads)?;
+    let sim_vals: Vec<SimVals> = pool.install(|| {
+        (1..=n)
+            .into_par_iter()
+            .flat_map(|x| compute_row_sims(interactions, sum_squares, n, x))
+            .collect()
+    });
 
     let mut cosine_sims: Vec<(u32, u32, f32)> = Vec::new();
 
@@ -237,6 +244,7 @@ pub(crate) fn compute_pair_stats(
 /// * `cum_values` - Output map storing (dot_product, co_occurrence_count) for each pair
 /// * `n` - Number of rows (excluding OOV index 0)
 /// * `min_common` - Minimum co-occurrence count to include a pair in results
+/// * `num_threads` - Number of threads to use for parallel computation
 ///
 /// # Returns
 /// Vector of (col1, col2, cosine_similarity) tuples meeting the min_common threshold
@@ -246,9 +254,11 @@ pub(crate) fn invert_cosine(
     cum_values: &mut FxHashMap<u64, CumValues>,
     n: usize,
     min_common: u32,
+    num_threads: usize,
 ) -> PyResult<Vec<(u32, u32, f32)>> {
     let start = Instant::now();
-    let pair_stats = compute_pair_stats(interactions, n);
+    let pool = create_thread_pool(num_threads)?;
+    let pair_stats = pool.install(|| compute_pair_stats(interactions, n));
     let mut cosine_sims = Vec::new();
 
     for (key, (prod, count)) in pair_stats {

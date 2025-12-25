@@ -7,7 +7,7 @@ use crate::similarities::{
     aggregate_sims, compute_cosine, compute_pair_stats, insert_sorted_neighbors,
 };
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{decode_pair, CumValues, Neighbor};
+use crate::utils::{create_thread_pool, decode_pair, CumValues, Neighbor};
 
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn update_sum_squares(
@@ -39,6 +39,7 @@ pub(crate) fn update_sum_squares(
 /// * `cum_values` - Existing statistics map to be updated in-place
 /// * `n` - Number of columns (excluding OOV index 0)
 /// * `min_common` - Minimum cumulative co-occurrence count to include in results
+/// * `num_threads` - Number of threads to use for parallel computation
 ///
 /// # Returns
 /// Vector of (col1, col2, cosine_similarity) tuples with updated similarities
@@ -48,9 +49,11 @@ pub(crate) fn update_cosine(
     cum_values: &mut FxHashMap<u64, CumValues>,
     n: usize,
     min_common: u32,
+    num_threads: usize,
 ) -> PyResult<Vec<(u32, u32, f32)>> {
     let start = Instant::now();
-    let pair_stats = compute_pair_stats(interactions, n);
+    let pool = create_thread_pool(num_threads)?;
+    let pair_stats = pool.install(|| compute_pair_stats(interactions, n));
     let mut cosine_sims: Vec<(u32, u32, f32)> = Vec::new();
 
     for (key, (prod, count)) in pair_stats {

@@ -8,7 +8,7 @@ use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
 use crate::serialization::{load_model, save_model};
 use crate::similarities::{compute_sum_squares, forward_cosine, invert_cosine, sort_by_sims};
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{create_thread_pool, CumValues, Neighbor, DEFAULT_PRED, OOV_IDX};
+use crate::utils::{CumValues, Neighbor, DEFAULT_PRED, OOV_IDX};
 
 #[pyclass(module = "recfarm", name = "UserCF")]
 #[derive(Serialize, Deserialize)]
@@ -24,6 +24,7 @@ pub struct PyUserCF {
     user_interactions: CsrMatrix<u32, f32>,
     item_interactions: CsrMatrix<u32, f32>,
     user_consumed: FxHashMap<u32, Vec<u32>>,
+    use_inverted_index: bool,
 }
 
 #[pymethods]
@@ -71,33 +72,33 @@ impl PyUserCF {
             user_interactions,
             item_interactions,
             user_consumed,
+            use_inverted_index: true,
         })
     }
 
     /// forward index: sparse matrix of `user` interaction
     /// invert index: sparse matrix of `item` interaction
-    fn compute_similarities(&mut self, invert: bool, num_threads: usize) -> PyResult<()> {
+    fn compute_similarities(&mut self, num_threads: usize) -> PyResult<()> {
         self.sum_squares = compute_sum_squares(&self.user_interactions, self.n_users);
 
-        let cosine_sims = if invert {
+        let cosine_sims = if self.use_inverted_index {
             invert_cosine(
                 &self.item_interactions,
                 &self.sum_squares,
                 &mut self.cum_values,
                 self.n_items,
                 self.min_common,
+                num_threads,
             )?
         } else {
-            let pool = create_thread_pool(num_threads)?;
-            pool.install(|| {
-                forward_cosine(
-                    &self.user_interactions,
-                    &self.sum_squares,
-                    &mut self.cum_values,
-                    self.n_users,
-                    self.min_common,
-                )
-            })?
+            forward_cosine(
+                &self.user_interactions,
+                &self.sum_squares,
+                &mut self.cum_values,
+                self.n_users,
+                self.min_common,
+                num_threads,
+            )?
         };
 
         sort_by_sims(&cosine_sims, &mut self.user_sims)?;
@@ -110,6 +111,7 @@ impl PyUserCF {
         &mut self,
         user_interactions: &Bound<'_, PyAny>,
         item_interactions: &Bound<'_, PyAny>,
+        num_threads: usize,
     ) -> PyResult<()> {
         let new_user_interactions: CsrMatrix<u32, f32> = user_interactions.extract()?;
         let new_item_interactions: CsrMatrix<u32, f32> = item_interactions.extract()?;
@@ -122,6 +124,7 @@ impl PyUserCF {
             &mut self.cum_values,
             self.n_items,
             self.min_common,
+            num_threads,
         )?;
 
         update_by_sims(&cosine_sims, &mut self.user_sims)?;
@@ -326,7 +329,7 @@ mod tests {
                 &item_interactions,
                 &user_consumed,
             )?;
-            user_cf.compute_similarities(true, 1)?;
+            user_cf.compute_similarities(1)?;
             Ok(user_cf)
         })?;
         Ok(user_cf)
@@ -395,7 +398,7 @@ mod tests {
             user_cf.n_users = 6;
             user_cf.n_items = 5;
             user_cf.user_consumed = _user_consumed.extract::<FxHashMap<u32, Vec<u32>>>()?;
-            user_cf.update_similarities(&user_interactions, &item_interactions)?;
+            user_cf.update_similarities(&user_interactions, &item_interactions, 1)?;
             let users = PyList::new(py, vec![6, 2])?;
             let rec_result = user_cf.recommend(py, &users, 10, true, false)?;
             assert_eq!(rec_result.0.len(), 2);
@@ -435,7 +438,7 @@ mod tests {
                     sparse_data: vec![1.0, 3.0, 4.0, 2.0, 3.0],
                 },
             )?;
-            user_cf.update_similarities(&user_interactions, &item_interactions)?;
+            user_cf.update_similarities(&user_interactions, &item_interactions, 1)?;
             Ok(())
         })?;
         assert_eq!(get_nbs(&user_cf, 1), vec![4, 2, 3, 5]);

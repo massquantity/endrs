@@ -92,9 +92,9 @@ impl PySwing {
     /// update on new sparse interactions
     fn update_swing(
         &mut self,
-        num_threads: usize,
         user_interactions: &Bound<'_, PyAny>,
         item_interactions: &Bound<'_, PyAny>,
+        num_threads: usize,
     ) -> PyResult<()> {
         let pool = create_thread_pool(num_threads)?;
         let new_user_interactions: CsrMatrix<u32, f32> = user_interactions.extract()?;
