@@ -8,8 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::sparse::{get_row, CsrMatrix};
-
-type ScoredItems = Vec<(u32, f32)>;
+use crate::utils::{Neighbor, SIM_EPS};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Graph {
@@ -34,21 +33,21 @@ impl Graph {
         target_item: usize,
         user_interactions: &CsrMatrix<u32, f32>,
         item_interactions: &CsrMatrix<u32, f32>,
-        prev_scores: &FxHashMap<u32, ScoredItems>,
+        prev_sims: &FxHashMap<u32, Vec<Neighbor>>,
         user_weights: &[f32],
         cached_common_items: Arc<DashMap<u64, Vec<usize>>>,
-    ) -> (u32, ScoredItems) {
+    ) -> (u32, Vec<Neighbor>) {
         let target_u32 = target_item as u32;
         let users = get_row_vec(item_interactions, target_item);
         if users.len() < 2 {
-            let scores = prev_scores
+            let sims = prev_sims
                 .get(&target_u32)
                 .cloned()
                 .unwrap_or_default();
-            return (target_u32, scores);
+            return (target_u32, sims);
         }
 
-        let mut item_scores = init_item_scores(target_u32, self.n_items, prev_scores);
+        let mut swing_sims = init_swing_sims(target_u32, self.n_items, prev_sims);
         for (j, &u) in users.iter().enumerate() {
             for &v in &users[(j + 1)..users.len()] {
                 let key = (u as u64) * (self.n_users as u64) + (v as u64);
@@ -71,44 +70,44 @@ impl Graph {
                 let score = user_weights[u] * user_weights[v] * (self.alpha + k).recip();
                 for i in common_items {
                     if i != target_item {
-                        item_scores[i] += score;
+                        swing_sims[i] += score;
                     }
                 }
             }
         }
 
-        (target_u32, extract_valid_scores(item_scores))
+        (target_u32, extract_valid_sims(swing_sims))
     }
 
-    pub(crate) fn compute_swing_scores(
+    pub(crate) fn compute_swing_sims(
         &self,
         user_interactions: &CsrMatrix<u32, f32>,
         item_interactions: &CsrMatrix<u32, f32>,
-        prev_mapping: &FxHashMap<u32, ScoredItems>,
-    ) -> PyResult<FxHashMap<u32, ScoredItems>> {
+        prev_sims: &FxHashMap<u32, Vec<Neighbor>>,
+    ) -> PyResult<FxHashMap<u32, Vec<Neighbor>>> {
         let user_weights = compute_user_weights(user_interactions, self.n_users);
         let cached_common_items: Arc<DashMap<u64, Vec<usize>>> = Arc::new(DashMap::new());
-        let swing_scores: Vec<(u32, ScoredItems)> = (1..=self.n_items)
+        let swing_sims: Vec<(u32, Vec<Neighbor>)> = (1..=self.n_items)
             .into_par_iter()
             .filter_map(|i| {
-                let (item, scores) = self.compute_single_swing(
+                let (item, sims) = self.compute_single_swing(
                     i,
                     user_interactions,
                     item_interactions,
-                    prev_mapping,
+                    prev_sims,
                     &user_weights,
                     Arc::clone(&cached_common_items),
                 );
 
-                if scores.is_empty() {
+                if sims.is_empty() {
                     None
                 } else {
-                    Some((item, scores))
+                    Some((item, sims))
                 }
             })
             .collect();
 
-        Ok(FxHashMap::from_iter(swing_scores))
+        Ok(FxHashMap::from_iter(swing_sims))
     }
 }
 
@@ -152,35 +151,35 @@ fn get_row_vec(matrix: &CsrMatrix<u32, f32>, n: usize) -> Vec<usize> {
     }
 }
 
-fn init_item_scores(
+fn init_swing_sims(
     target_item: u32,
     n_items: usize,
-    prev_scores: &FxHashMap<u32, ScoredItems>,
+    prev_sims: &FxHashMap<u32, Vec<Neighbor>>,
 ) -> Vec<f32> {
-    let mut item_scores = vec![0.0; n_items + 1];
-    if let Some(scores) = prev_scores.get(&target_item) {
-        for &(i, s) in scores {
-            item_scores[i as usize] = s;
+    let mut swing_sims = vec![0.0; n_items + 1];
+    if let Some(sims) = prev_sims.get(&target_item) {
+        for nb in sims {
+            swing_sims[nb.id as usize] = nb.sim;
         }
     }
-    item_scores
+    swing_sims
 }
 
-fn extract_valid_scores(scores: Vec<f32>) -> ScoredItems {
-    let mut non_zero_scores: ScoredItems = scores
+fn extract_valid_sims(sims: Vec<f32>) -> Vec<Neighbor> {
+    let mut non_zero_sims: Vec<Neighbor> = sims
         .into_iter()
         .enumerate()
-        .filter_map(|(i, score)| {
-            if score != 0.0 {
-                Some((i as u32, score))
+        .filter_map(|(i, sim)| {
+            if sim.abs() > SIM_EPS {
+                Some(Neighbor { id: i as u32, sim })
             } else {
                 None
             }
         })
         .collect();
 
-    if non_zero_scores.len() > 1 {
-        non_zero_scores.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
+    if non_zero_sims.len() > 1 {
+        non_zero_sims.sort_unstable_by(|a, b| a.sim.partial_cmp(&b.sim).unwrap().reverse());
     }
-    non_zero_scores
+    non_zero_sims
 }

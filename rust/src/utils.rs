@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const OOV_IDX: u32 = 0;
 pub(crate) const DEFAULT_PRED: f32 = 0.0;
+pub(crate) const SIM_EPS: f32 = 1e-8;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Neighbor {
