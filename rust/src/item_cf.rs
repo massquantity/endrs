@@ -173,9 +173,9 @@ impl PyItemCF {
 
                     nb_sims.sort_unstable_by_key(|&(i, _)| i);
 
-                    let item_labels: Vec<(u32, f32)> = item_labels.collect();
+                    let nb_labels: Vec<(u32, f32)> = item_labels.collect();
                     let (k_nb_sims, k_nb_labels) =
-                        get_intersect_neighbors(&nb_sims, &item_labels, self.k_sim);
+                        get_intersect_neighbors(&nb_sims, &nb_labels, self.k_sim);
 
                     if k_nb_sims.is_empty() {
                         DEFAULT_PRED
@@ -220,16 +220,15 @@ impl PyItemCF {
                         if let Some(neighbors) = self.item_sims.get(&i) {
                             let sim_num = std::cmp::min(self.k_sim, neighbors.len());
                             for nb in &neighbors[..sim_num] {
-                                let j = nb.id;
-                                let i_j_sim = nb.sim;
-                                if filter_consumed && consumed.contains(&j) {
+                                if filter_consumed && consumed.contains(&nb.id) {
                                     continue;
                                 }
 
+                                let delta = nb.sim * i_label;
                                 item_scores
-                                    .entry(j)
-                                    .and_modify(|score| *score += i_j_sim * i_label)
-                                    .or_insert(i_j_sim * i_label);
+                                    .entry(nb.id)
+                                    .and_modify(|score| *score += delta)
+                                    .or_insert(delta);
                             }
                         }
                     }

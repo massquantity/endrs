@@ -173,9 +173,9 @@ impl PyUserCF {
 
                     nb_sims.sort_unstable_by_key(|&(u, _)| u);
 
-                    let user_labels: Vec<(u32, f32)> = user_labels.collect();
+                    let nb_labels: Vec<(u32, f32)> = user_labels.collect();
                     let (k_nb_sims, k_nb_labels) =
-                        get_intersect_neighbors(&nb_sims, &user_labels, self.k_sim);
+                        get_intersect_neighbors(&nb_sims, &nb_labels, self.k_sim);
 
                     if k_nb_sims.is_empty() {
                         DEFAULT_PRED
@@ -217,18 +217,17 @@ impl PyUserCF {
                 let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
                 let sim_num = std::cmp::min(self.k_sim, neighbors.len());
                 for nb in &neighbors[..sim_num] {
-                    let v = nb.id;
-                    let u_v_sim = nb.sim;
-                    if let Some(row) = get_row(&self.user_interactions, v as usize, false) {
-                        for (i, v_i_score) in row {
+                    if let Some(row) = get_row(&self.user_interactions, nb.id as usize, false) {
+                        for (i, i_label) in row {
                             if filter_consumed && consumed.contains(&i) {
                                 continue;
                             }
 
+                            let delta = nb.sim * i_label;
                             item_scores
                                 .entry(i)
-                                .and_modify(|score| *score += u_v_sim * v_i_score)
-                                .or_insert(u_v_sim * v_i_score);
+                                .and_modify(|score| *score += delta)
+                                .or_insert(delta);
                         }
                     }
                 }

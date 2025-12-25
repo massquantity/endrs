@@ -7,7 +7,7 @@ use crate::graph::Graph;
 use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
 use crate::serialization::{load_model, save_model};
 use crate::sparse::{get_row, CsrMatrix};
-use crate::utils::{create_thread_pool, DEFAULT_PRED, OOV_IDX};
+use crate::utils::{create_thread_pool, Neighbor, DEFAULT_PRED, OOV_IDX};
 
 #[pyclass(module = "endrs_ext", name = "Swing")]
 #[derive(Serialize, Deserialize)]
@@ -18,7 +18,7 @@ pub struct PySwing {
     n_users: usize,
     n_items: usize,
     graph: Graph,
-    swing_score_mapping: FxHashMap<u32, Vec<(u32, f32)>>,
+    item_swing_sims: FxHashMap<u32, Vec<Neighbor>>,
     user_interactions: CsrMatrix<u32, f32>,
     item_interactions: CsrMatrix<u32, f32>,
     user_consumed: FxHashMap<u32, Vec<u32>>,
@@ -68,7 +68,7 @@ impl PySwing {
             n_users,
             n_items,
             graph,
-            swing_score_mapping: FxHashMap::default(),
+            item_swing_sims: FxHashMap::default(),
             user_interactions,
             item_interactions,
             user_consumed,
@@ -77,13 +77,13 @@ impl PySwing {
 
     fn compute_swing(&mut self, num_threads: usize) -> PyResult<()> {
         let pool = create_thread_pool(num_threads)?;
-        self.swing_score_mapping.clear();
+        self.item_swing_sims.clear();
 
-        self.swing_score_mapping = pool.install(|| {
-            self.graph.compute_swing_scores(
+        self.item_swing_sims = pool.install(|| {
+            self.graph.compute_swing_sims(
                 &self.user_interactions,
                 &self.item_interactions,
-                &self.swing_score_mapping,
+                &self.item_swing_sims,
             )
         })?;
         Ok(())
@@ -100,11 +100,11 @@ impl PySwing {
         let new_user_interactions: CsrMatrix<u32, f32> = user_interactions.extract()?;
         let new_item_interactions: CsrMatrix<u32, f32> = item_interactions.extract()?;
 
-        self.swing_score_mapping = pool.install(|| {
-            self.graph.compute_swing_scores(
+        self.item_swing_sims = pool.install(|| {
+            self.graph.compute_swing_sims(
                 &new_user_interactions,
                 &new_item_interactions,
-                &self.swing_score_mapping,
+                &self.item_swing_sims,
             )
         })?;
 
@@ -123,14 +123,14 @@ impl PySwing {
     }
 
     fn num_swing_elements(&self) -> PyResult<usize> {
-        if self.swing_score_mapping.is_empty() {
+        if self.item_swing_sims.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "call `compute_swing` method before calling `num_swing_elements`",
             ));
         }
 
         let n_elements = self
-            .swing_score_mapping
+            .item_swing_sims
             .values()
             .map(|i| i.len())
             .sum();
@@ -150,23 +150,26 @@ impl PySwing {
             }
 
             let pred = match (
-                self.swing_score_mapping.get(&i),
+                self.item_swing_sims.get(&i),
                 get_row(&self.user_interactions, u as usize, false),
             ) {
-                (Some(item_swings), Some(item_labels)) => {
-                    let num = self.top_k.min(item_swings.len());
-                    let mut item_swing_scores = vec![(0, 0.0); num];
-                    item_swing_scores.clone_from_slice(&item_swings[..num]);
-                    item_swing_scores.sort_unstable_by_key(|&(i, _)| i);
+                (Some(swing_neighbors), Some(item_labels)) => {
+                    let num = self.top_k.min(swing_neighbors.len());
+                    let mut nb_sims: Vec<(u32, f32)> = swing_neighbors[..num]
+                        .iter()
+                        .map(|nb| (nb.id, nb.sim))
+                        .collect();
 
-                    let item_labels: Vec<(u32, f32)> = item_labels.collect();
-                    let (k_nb_swings, k_nb_labels) =
-                        get_intersect_neighbors(&item_swing_scores, &item_labels, self.top_k);
+                    nb_sims.sort_unstable_by_key(|&(i, _)| i);
 
-                    if k_nb_swings.is_empty() {
+                    let nb_labels: Vec<(u32, f32)> = item_labels.collect();
+                    let (k_nb_sims, k_nb_labels) =
+                        get_intersect_neighbors(&nb_sims, &nb_labels, self.top_k);
+
+                    if k_nb_sims.is_empty() {
                         DEFAULT_PRED
                     } else {
-                        compute_pred("ranking", &k_nb_swings, &k_nb_labels)?
+                        compute_pred("ranking", &k_nb_sims, &k_nb_labels)?
                     }
                 }
                 _ => DEFAULT_PRED,
@@ -204,17 +207,18 @@ impl PySwing {
                 if let Some(row) = get_row(&self.user_interactions, u as usize, false) {
                     let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
                     for (i, i_label) in row {
-                        if let Some(item_swings) = self.swing_score_mapping.get(&i) {
-                            let num = self.top_k.min(item_swings.len());
-                            for &(j, i_j_swing_score) in &item_swings[..num] {
-                                if filter_consumed && consumed.contains(&j) {
+                        if let Some(swing_neighbors) = self.item_swing_sims.get(&i) {
+                            let num = self.top_k.min(swing_neighbors.len());
+                            for nb in &swing_neighbors[..num] {
+                                if filter_consumed && consumed.contains(&nb.id) {
                                     continue;
                                 }
 
+                                let delta = nb.sim * i_label;
                                 item_scores
-                                    .entry(j)
-                                    .and_modify(|score| *score += i_j_swing_score * i_label)
-                                    .or_insert(i_j_swing_score * i_label);
+                                    .entry(nb.id)
+                                    .and_modify(|score| *score += delta)
+                                    .or_insert(delta);
                             }
                         }
                     }
@@ -330,8 +334,8 @@ mod tests {
 
         let test_user_id = 1u32;
         let match_item_fn = |model: &PySwing, p: usize, i: u32, s: f32| {
-            let (item, score) = model.swing_score_mapping[&test_user_id][p];
-            item == i && (score - s).abs() < 1e-10
+            let nb = &model.item_swing_sims[&test_user_id][p];
+            nb.id == i && (nb.sim - s).abs() < 1e-10
         };
 
         let user_weights = [
@@ -348,7 +352,7 @@ mod tests {
             + user_weights[2] * user_weights[3] * (1_f32 + common_nums[2]).recip();
         let swing_model = get_swing_model()?;
 
-        assert_eq!(swing_model.swing_score_mapping[&test_user_id].len(), 3);
+        assert_eq!(swing_model.item_swing_sims[&test_user_id].len(), 3);
         assert!(match_item_fn(&swing_model, 0, 4, swing_1_4));
         assert!(match_item_fn(&swing_model, 1, 2, swing_1_2));
         assert!(match_item_fn(&swing_model, 2, 3, swing_1_3));
