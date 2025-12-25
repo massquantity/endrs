@@ -110,7 +110,7 @@ class Swing:
         else:
             with time_block("update swing", verbose=1):
                 self.rs_model.update_swing(
-                    self.num_threads, user_interacts, item_interacts
+                    user_interacts, item_interacts, self.num_threads
                 )
 
         num = self.rs_model.num_swing_elements()
