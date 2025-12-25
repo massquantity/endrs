@@ -191,11 +191,14 @@ impl PySwing {
 
         for u in users {
             let u: u32 = u.extract()?;
-            let consumed: FxHashSet<u32> = self
-                .user_consumed
-                .get(&u)
-                .map(|v| FxHashSet::from_iter(v.iter().cloned()))
-                .unwrap_or_default();
+            let consumed: FxHashSet<u32> = if filter_consumed {
+                self.user_consumed
+                    .get(&u)
+                    .map(|v| v.iter().copied().collect())
+                    .unwrap_or_default()
+            } else {
+                FxHashSet::default()
+            };
 
             let (rec_items, additional_count) =
                 if let Some(row) = get_row(&self.user_interactions, u as usize, false) {

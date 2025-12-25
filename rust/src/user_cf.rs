@@ -204,10 +204,14 @@ impl PyUserCF {
         let mut additional_rec_counts = Vec::new();
         for u in users {
             let u: u32 = u.extract()?;
-            let consumed = self
-                .user_consumed
-                .get(&u)
-                .map_or(FxHashSet::default(), FxHashSet::from_iter);
+            let consumed: FxHashSet<u32> = if filter_consumed {
+                self.user_consumed
+                    .get(&u)
+                    .map(|v| v.iter().copied().collect())
+                    .unwrap_or_default()
+            } else {
+                FxHashSet::default()
+            };
 
             let (rec_items, additional_count) = if let Some(neighbors) = self.user_sims.get(&u) {
                 let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
