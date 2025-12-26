@@ -7,6 +7,7 @@ use pyo3::PyResult;
 use rand::prelude::SliceRandom;
 
 use crate::ordering::SimOrd;
+use crate::utils::{Neighbor, DEFAULT_PRED};
 
 pub(crate) fn get_intersect_neighbors(
     elem_sims: &[(u32, f32)],
@@ -72,6 +73,33 @@ pub(crate) fn compute_pred(
     };
 
     Ok(pred)
+}
+
+pub(crate) fn predict_single<I>(
+    neighbors: &[Neighbor],
+    interactions: I,
+    k: usize,
+    task: &str,
+) -> PyResult<f32>
+where
+    I: Iterator<Item = (u32, f32)>,
+{
+    let sim_num = k.min(neighbors.len());
+    let mut nb_sims: Vec<(u32, f32)> = neighbors[..sim_num]
+        .iter()
+        .map(|n| (n.id, n.sim))
+        .collect();
+
+    nb_sims.sort_unstable_by_key(|&(id, _)| id);
+
+    let nb_interactions: Vec<(u32, f32)> = interactions.collect();
+    let (k_nb_sims, k_nb_interactions) = get_intersect_neighbors(&nb_sims, &nb_interactions, k);
+
+    if k_nb_sims.is_empty() {
+        Ok(DEFAULT_PRED)
+    } else {
+        compute_pred(task, &k_nb_sims, &k_nb_interactions)
+    }
 }
 
 pub(crate) fn get_rec_items(

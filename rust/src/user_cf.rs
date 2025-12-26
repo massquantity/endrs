@@ -4,7 +4,7 @@ use pyo3::types::*;
 use serde::{Deserialize, Serialize};
 
 use crate::incremental::{update_by_sims, update_cosine, update_sum_squares};
-use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
+use crate::inference::{get_rec_items, predict_single};
 use crate::serialization::{load_model, save_model};
 use crate::similarities::{compute_sum_squares, forward_cosine, invert_cosine, sort_by_sims};
 use crate::sparse::{get_row, CsrMatrix};
@@ -164,24 +164,8 @@ impl PyUserCF {
                 self.user_sims.get(&u),
                 get_row(&self.item_interactions, i as usize, false),
             ) {
-                (Some(neighbors), Some(user_labels)) => {
-                    let sim_num = std::cmp::min(self.k_sim, neighbors.len());
-                    let mut nb_sims: Vec<(u32, f32)> = neighbors[..sim_num]
-                        .iter()
-                        .map(|n| (n.id, n.sim))
-                        .collect();
-
-                    nb_sims.sort_unstable_by_key(|&(u, _)| u);
-
-                    let nb_labels: Vec<(u32, f32)> = user_labels.collect();
-                    let (k_nb_sims, k_nb_labels) =
-                        get_intersect_neighbors(&nb_sims, &nb_labels, self.k_sim);
-
-                    if k_nb_sims.is_empty() {
-                        DEFAULT_PRED
-                    } else {
-                        compute_pred(&self.task, &k_nb_sims, &k_nb_labels)?
-                    }
+                (Some(neighbors), Some(interactions)) => {
+                    predict_single(neighbors, interactions, self.k_sim, &self.task)?
                 }
                 _ => DEFAULT_PRED,
             };

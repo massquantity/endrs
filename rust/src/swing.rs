@@ -4,7 +4,7 @@ use pyo3::types::*;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::Graph;
-use crate::inference::{compute_pred, get_intersect_neighbors, get_rec_items};
+use crate::inference::{get_rec_items, predict_single};
 use crate::serialization::{load_model, save_model};
 use crate::sparse::{get_row, CsrMatrix};
 use crate::utils::{create_thread_pool, Neighbor, DEFAULT_PRED, OOV_IDX};
@@ -153,24 +153,8 @@ impl PySwing {
                 self.item_swing_sims.get(&i),
                 get_row(&self.user_interactions, u as usize, false),
             ) {
-                (Some(swing_neighbors), Some(item_labels)) => {
-                    let num = self.top_k.min(swing_neighbors.len());
-                    let mut nb_sims: Vec<(u32, f32)> = swing_neighbors[..num]
-                        .iter()
-                        .map(|nb| (nb.id, nb.sim))
-                        .collect();
-
-                    nb_sims.sort_unstable_by_key(|&(i, _)| i);
-
-                    let nb_labels: Vec<(u32, f32)> = item_labels.collect();
-                    let (k_nb_sims, k_nb_labels) =
-                        get_intersect_neighbors(&nb_sims, &nb_labels, self.top_k);
-
-                    if k_nb_sims.is_empty() {
-                        DEFAULT_PRED
-                    } else {
-                        compute_pred("ranking", &k_nb_sims, &k_nb_labels)?
-                    }
+                (Some(neighbors), Some(interactions)) => {
+                    predict_single(neighbors, interactions, self.top_k, "ranking")?
                 }
                 _ => DEFAULT_PRED,
             };
