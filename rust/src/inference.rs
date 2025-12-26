@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use fxhash::FxHashMap;
@@ -8,43 +7,6 @@ use rand::prelude::SliceRandom;
 
 use crate::ordering::SimOrd;
 use crate::utils::{Neighbor, DEFAULT_PRED};
-
-pub(crate) fn get_intersect_neighbors(
-    elem_sims: &[(u32, f32)],
-    elem_labels: &[(u32, f32)],
-    k_sim: usize,
-) -> (Vec<f32>, Vec<f32>) {
-    let mut i = 0;
-    let mut j = 0;
-    let mut max_heap: BinaryHeap<SimOrd> = BinaryHeap::new();
-    while i < elem_sims.len() && j < elem_labels.len() {
-        let elem1 = elem_sims[i].0;
-        let elem2 = elem_labels[j].0;
-        match elem1.cmp(&elem2) {
-            Ordering::Less => i += 1,
-            Ordering::Greater => j += 1,
-            Ordering::Equal => {
-                max_heap.push(SimOrd(elem_sims[i].1, elem_labels[j].1));
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-
-    let mut k_neighbor_sims = Vec::new();
-    let mut k_neighbor_labels = Vec::new();
-    for _ in 0..k_sim {
-        match max_heap.pop() {
-            Some(SimOrd(sim, label)) => {
-                k_neighbor_sims.push(sim);
-                k_neighbor_labels.push(label);
-            }
-            None => break,
-        }
-    }
-
-    (k_neighbor_sims, k_neighbor_labels)
-}
 
 pub(crate) fn compute_pred(
     task: &str,
@@ -85,20 +47,36 @@ where
     I: Iterator<Item = (u32, f32)>,
 {
     let sim_num = k.min(neighbors.len());
-    let mut nb_sims: Vec<(u32, f32)> = neighbors[..sim_num]
-        .iter()
-        .map(|n| (n.id, n.sim))
-        .collect();
 
-    nb_sims.sort_unstable_by_key(|&(id, _)| id);
+    let mut sim_by_id: FxHashMap<u32, f32> = FxHashMap::default();
+    sim_by_id.reserve(sim_num);
+    for nb in &neighbors[..sim_num] {
+        sim_by_id.insert(nb.id, nb.sim);
+    }
 
-    let nb_interactions: Vec<(u32, f32)> = interactions.collect();
-    let (k_nb_sims, k_nb_interactions) = get_intersect_neighbors(&nb_sims, &nb_interactions, k);
+    let mut max_heap: BinaryHeap<SimOrd> = BinaryHeap::new();
+    for (id, label) in interactions {
+        if let Some(&sim) = sim_by_id.get(&id) {
+            max_heap.push(SimOrd(sim, label));
+        }
+    }
 
-    if k_nb_sims.is_empty() {
+    let mut k_neighbor_sims = Vec::new();
+    let mut k_neighbor_labels = Vec::new();
+    for _ in 0..k {
+        match max_heap.pop() {
+            Some(SimOrd(sim, label)) => {
+                k_neighbor_sims.push(sim);
+                k_neighbor_labels.push(label);
+            }
+            None => break,
+        }
+    }
+
+    if k_neighbor_sims.is_empty() {
         Ok(DEFAULT_PRED)
     } else {
-        compute_pred(task, &k_nb_sims, &k_nb_interactions)
+        compute_pred(task, &k_neighbor_sims, &k_neighbor_labels)
     }
 }
 
@@ -132,14 +110,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_intersect_neighbors() {
-        let elem_sims = vec![(1, 0.1), (2, 0.6), (3, 0.3), (4, 0.8), (5, 0.5)];
-        let elem_labels = vec![(1, 2.0), (2, 4.0), (3, 1.0), (4, 3.0), (5, 5.0)];
-        let (k_neighbor_sims, k_neighbor_labels) =
-            get_intersect_neighbors(&elem_sims, &elem_labels, 2);
+    fn test_predict_single() -> PyResult<()> {
+        pyo3::prepare_freethreaded_python();
 
-        assert_eq!(k_neighbor_sims, vec![0.8, 0.6]);
-        assert_eq!(k_neighbor_labels, vec![3.0, 4.0]);
+        let neighbors = vec![
+            Neighbor { id: 4, sim: 0.8 },
+            Neighbor { id: 2, sim: 0.6 },
+            Neighbor { id: 5, sim: 0.5 },
+            Neighbor { id: 3, sim: 0.3 },
+            Neighbor { id: 1, sim: 0.1 },
+        ];
+        let interactions = vec![(1, 2.0), (2, 4.0), (3, 1.0), (4, 3.0), (5, 5.0)];
+
+        // ranking task: sum_sims / len = (0.8 + 0.6) / 2 = 0.7
+        let pred = predict_single(&neighbors, interactions.clone().into_iter(), 2, "ranking")?;
+        assert!((pred - 0.7).abs() < 1e-6);
+
+        // rating task: weighted average
+        // top 2 by sim: id=4 (sim=0.8, label=3.0), id=2 (sim=0.6, label=4.0)
+        // pred = (0.8*3.0 + 0.6*4.0) / (0.8 + 0.6) = 4.8 / 1.4
+        let pred = predict_single(&neighbors, interactions.into_iter(), 2, "rating")?;
+        assert!((pred - 4.8 / 1.4).abs() < 1e-6);
+
+        Ok(())
     }
 
     #[test]
