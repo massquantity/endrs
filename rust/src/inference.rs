@@ -2,10 +2,13 @@ use std::collections::BinaryHeap;
 
 use fxhash::FxHashMap;
 use pyo3::exceptions::PyValueError;
-use pyo3::PyResult;
+use pyo3::prelude::*;
+use pyo3::types::PyList;
 use rand::prelude::SliceRandom;
 
+use crate::consumed::get_consumed_set;
 use crate::ordering::SimOrd;
+use crate::sparse::{get_row, CsrMatrix};
 use crate::utils::{Neighbor, DEFAULT_PRED};
 
 pub(crate) fn compute_pred(
@@ -103,6 +106,76 @@ pub(crate) fn get_rec_items(
             .map(|(i, _)| i)
             .collect::<Vec<_>>()
     }
+}
+
+pub(crate) fn empty_recs(py: Python, n_rec: usize) -> (Bound<PyList>, usize) {
+    (PyList::empty(py), n_rec)
+}
+
+pub(crate) fn finalize_recs(
+    py: Python,
+    item_scores: FxHashMap<u32, f32>,
+    n_rec: usize,
+    random_rec: bool,
+) -> PyResult<(Bound<PyList>, usize)> {
+    if item_scores.is_empty() {
+        return Ok((PyList::empty(py), n_rec));
+    }
+    let items = get_rec_items(item_scores, n_rec, random_rec);
+    let additional = n_rec - items.len();
+    Ok((PyList::new(py, items)?, additional))
+}
+
+#[rustfmt::skip]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recommend_by_item_sims<'py>(
+    py: Python<'py>,
+    users: &Bound<'py, PyList>,
+    n_rec: usize,
+    filter_consumed: bool,
+    random_rec: bool,
+    k_sim: usize,
+    user_consumed: &FxHashMap<u32, Vec<u32>>,
+    user_interactions: &CsrMatrix<u32, f32>,
+    item_sims: &FxHashMap<u32, Vec<Neighbor>>,
+) -> PyResult<(Vec<Bound<'py, PyList>>, Bound<'py, PyList>)> {
+    let mut recs = Vec::new();
+    let mut additional_rec_counts = Vec::new();
+
+    for u in users {
+        let u: u32 = u.extract()?;
+        let consumed = get_consumed_set(user_consumed, u, filter_consumed);
+
+        let (rec_items, additional_count) =
+            if let Some(row) = get_row(user_interactions, u as usize, false) {
+                let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
+                for (i, i_label) in row {
+                    if let Some(neighbors) = item_sims.get(&i) {
+                        let sim_num = std::cmp::min(k_sim, neighbors.len());
+                        for nb in &neighbors[..sim_num] {
+                            if consumed.as_ref().is_some_and(|c| c.contains(&nb.id)) {
+                                continue;
+                            }
+
+                            let delta = nb.sim * i_label;
+                            item_scores
+                                .entry(nb.id)
+                                .and_modify(|score| *score += delta)
+                                .or_insert(delta);
+                        }
+                    }
+                }
+                finalize_recs(py, item_scores, n_rec, random_rec)?
+            } else {
+                empty_recs(py, n_rec)
+            };
+
+        recs.push(rec_items);
+        additional_rec_counts.push(additional_count);
+    }
+
+    let additional_rec_counts = PyList::new(py, additional_rec_counts)?;
+    Ok((recs, additional_rec_counts))
 }
 
 #[cfg(test)]

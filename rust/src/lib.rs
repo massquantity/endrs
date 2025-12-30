@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 
+mod consumed;
 mod graph;
 mod incremental;
 mod inference;

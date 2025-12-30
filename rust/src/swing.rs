@@ -1,10 +1,10 @@
-use fxhash::{FxHashMap, FxHashSet};
+use fxhash::FxHashMap;
 use pyo3::prelude::*;
 use pyo3::types::*;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::Graph;
-use crate::inference::{get_rec_items, predict_single};
+use crate::inference::{predict_single, recommend_by_item_sims};
 use crate::serialization::{load_model, save_model};
 use crate::sparse::{get_row, CsrMatrix};
 use crate::utils::{create_thread_pool, Neighbor, DEFAULT_PRED, OOV_IDX};
@@ -173,57 +173,17 @@ impl PySwing {
         filter_consumed: bool,
         random_rec: bool,
     ) -> PyResult<(Vec<Bound<'py, PyList>>, Bound<'py, PyList>)> {
-        let mut recs = Vec::new();
-        let mut additional_rec_counts = Vec::new();
-
-        for u in users {
-            let u: u32 = u.extract()?;
-            let consumed: FxHashSet<u32> = if filter_consumed {
-                self.user_consumed
-                    .get(&u)
-                    .map(|v| v.iter().copied().collect())
-                    .unwrap_or_default()
-            } else {
-                FxHashSet::default()
-            };
-
-            let (rec_items, additional_count) =
-                if let Some(row) = get_row(&self.user_interactions, u as usize, false) {
-                    let mut item_scores: FxHashMap<u32, f32> = FxHashMap::default();
-                    for (i, i_label) in row {
-                        if let Some(swing_neighbors) = self.item_swing_sims.get(&i) {
-                            let num = self.top_k.min(swing_neighbors.len());
-                            for nb in &swing_neighbors[..num] {
-                                if filter_consumed && consumed.contains(&nb.id) {
-                                    continue;
-                                }
-
-                                let delta = nb.sim * i_label;
-                                item_scores
-                                    .entry(nb.id)
-                                    .and_modify(|score| *score += delta)
-                                    .or_insert(delta);
-                            }
-                        }
-                    }
-
-                    if item_scores.is_empty() {
-                        (PyList::empty(py), n_rec)
-                    } else {
-                        let items = get_rec_items(item_scores, n_rec, random_rec);
-                        let additional = n_rec - items.len();
-                        (PyList::new(py, items)?, additional)
-                    }
-                } else {
-                    (PyList::empty(py), n_rec)
-                };
-
-            recs.push(rec_items);
-            additional_rec_counts.push(additional_count);
-        }
-
-        let additional_rec_counts = PyList::new(py, additional_rec_counts)?;
-        Ok((recs, additional_rec_counts))
+        recommend_by_item_sims(
+            py,
+            users,
+            n_rec,
+            filter_consumed,
+            random_rec,
+            self.top_k,
+            &self.user_consumed,
+            &self.user_interactions,
+            &self.item_swing_sims,
+        )
     }
 }
 
