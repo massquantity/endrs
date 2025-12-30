@@ -5,7 +5,6 @@ mod graph;
 mod incremental;
 mod inference;
 mod item_cf;
-mod ordering;
 mod serialization;
 mod similarities;
 mod sparse;

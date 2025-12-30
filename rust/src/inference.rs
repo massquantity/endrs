@@ -1,45 +1,30 @@
-use std::collections::BinaryHeap;
-
 use fxhash::FxHashMap;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
-use rand::prelude::SliceRandom;
+use rand::seq::IteratorRandom;
 
 use crate::consumed::get_consumed_set;
-use crate::ordering::SimOrd;
 use crate::sparse::{get_row, CsrMatrix};
 use crate::utils::{Neighbor, DEFAULT_PRED};
 
-pub(crate) fn compute_pred(
-    task: &str,
-    k_neighbor_sims: &[f32],
-    k_neighbor_labels: &[f32],
-) -> PyResult<f32> {
-    let pred = match task {
-        "rating" => {
-            let sum_sims: f32 = k_neighbor_sims.iter().sum();
-            k_neighbor_sims
-                .iter()
-                .zip(k_neighbor_labels.iter())
-                .map(|(&sim, &label)| label * sim / sum_sims)
-                .sum()
-        }
-
-        "ranking" => {
-            let sum_sims: f32 = k_neighbor_sims.iter().sum();
-            sum_sims / k_neighbor_sims.len() as f32
-        }
-
-        _ => {
-            let err_msg = format!("Unknown task type: \"{task}\"");
-            return Err(PyValueError::new_err(err_msg));
-        }
-    };
-
-    Ok(pred)
-}
-
+/// Predict a score for a single user-item pair using neighbor-based collaborative filtering.
+///
+/// The function finds the intersection between the user's top-k similar neighbors and
+/// their historical interactions, then computes a prediction based on the task type.
+/// Since `neighbors` is pre-sorted by similarity in descending order, we iterate through
+/// them sequentially to find the top-k overlapping neighbors with interactions.
+///
+/// # Arguments
+/// * `neighbors` - Pre-sorted neighbors by similarity (descending)
+/// * `interactions` - Iterator of (item_id, label) pairs from historical data
+/// * `k` - Maximum number of neighbors to use for prediction
+/// * `task` - "rating" for weighted average, "ranking" for average similarity
+///
+/// # Returns
+/// * `rating` task: weighted_sum / sum_sims (similarity-weighted average of labels)
+/// * `ranking` task: sum_sims / count (average similarity score)
+/// * Returns DEFAULT_PRED if no intersection found
 pub(crate) fn predict_single<I>(
     neighbors: &[Neighbor],
     interactions: I,
@@ -50,61 +35,75 @@ where
     I: Iterator<Item = (u32, f32)>,
 {
     let sim_num = k.min(neighbors.len());
+    let label_by_id: FxHashMap<u32, f32> = interactions.collect();
 
-    let mut sim_by_id: FxHashMap<u32, f32> = FxHashMap::default();
-    sim_by_id.reserve(sim_num);
+    let mut sum_sims = 0.0f32;
+    let mut weighted_sum = 0.0f32;
+    let mut count = 0usize;
+
     for nb in &neighbors[..sim_num] {
-        sim_by_id.insert(nb.id, nb.sim);
-    }
-
-    let mut max_heap: BinaryHeap<SimOrd> = BinaryHeap::new();
-    for (id, label) in interactions {
-        if let Some(&sim) = sim_by_id.get(&id) {
-            max_heap.push(SimOrd(sim, label));
-        }
-    }
-
-    let mut k_neighbor_sims = Vec::new();
-    let mut k_neighbor_labels = Vec::new();
-    for _ in 0..k {
-        match max_heap.pop() {
-            Some(SimOrd(sim, label)) => {
-                k_neighbor_sims.push(sim);
-                k_neighbor_labels.push(label);
+        if let Some(&label) = label_by_id.get(&nb.id) {
+            sum_sims += nb.sim;
+            weighted_sum += nb.sim * label;
+            count += 1;
+            if count == k {
+                break;
             }
-            None => break,
         }
     }
 
-    if k_neighbor_sims.is_empty() {
-        Ok(DEFAULT_PRED)
-    } else {
-        compute_pred(task, &k_neighbor_sims, &k_neighbor_labels)
+    if count == 0 {
+        return Ok(DEFAULT_PRED);
+    }
+
+    match task {
+        "rating" => Ok(weighted_sum / sum_sims),
+        "ranking" => Ok(sum_sims / count as f32),
+        _ => Err(PyValueError::new_err(format!(
+            "Unknown task type: \"{task}\""
+        ))),
     }
 }
 
+/// Select top-n recommended items from candidate scores.
+///
+/// # Algorithm
+/// - **Random mode** (`random_rec=true`): Randomly sample n_rec items from candidates.
+///   Uses `IteratorRandom::choose_multiple` for O(n) single-pass sampling.
+///
+/// - **Score mode** (`random_rec=false`): Select items with highest scores.
+///   Uses `select_nth_unstable_by` (quickselect) for O(n) partitioning to find
+///   top n_rec items, then sorts only those n_rec items in O(k log k).
+///   This is more efficient than full O(n log n) sort when k << n.
+///
+/// # Arguments
+/// * `item_sim_scores` - HashMap of item_id -> aggregated similarity score
+/// * `n_rec` - Number of items to recommend
+/// * `random_rec` - If true, randomly sample; if false, select by highest score
+///
+/// # Returns
+/// Vector of recommended item IDs, sorted by score descending (in score mode)
 pub(crate) fn get_rec_items(
     item_sim_scores: FxHashMap<u32, f32>,
     n_rec: usize,
     random_rec: bool,
 ) -> Vec<u32> {
     if random_rec && item_sim_scores.len() > n_rec {
-        let mut rng = &mut rand::thread_rng();
+        let mut rng = rand::thread_rng();
         item_sim_scores
-            .keys()
-            .copied()
-            .collect::<Vec<u32>>()
+            .into_keys()
             .choose_multiple(&mut rng, n_rec)
-            .cloned()
-            .collect::<Vec<_>>()
     } else {
-        let mut item_preds: Vec<(u32, f32)> = item_sim_scores.into_iter().collect();
-        item_preds.sort_unstable_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap().reverse());
-        item_preds
-            .into_iter()
-            .take(n_rec)
-            .map(|(i, _)| i)
-            .collect::<Vec<_>>()
+        let mut items: Vec<(u32, f32)> = item_sim_scores.into_iter().collect();
+
+        if n_rec > 0 && items.len() > n_rec {
+            // O(n) to select top n_rec
+            items.select_nth_unstable_by(n_rec - 1, |(_, a), (_, b)| b.partial_cmp(a).unwrap());
+            items.truncate(n_rec);
+        }
+        // Sort only top n_rec: O(k log k)
+        items.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap());
+        items.into_iter().map(|(i, _)| i).collect()
     }
 }
 
@@ -126,6 +125,34 @@ pub(crate) fn finalize_recs(
     Ok((PyList::new(py, items)?, additional))
 }
 
+/// Generate item recommendations for multiple users based on item-item similarities.
+///
+/// For each user, this function aggregates similarity scores from their historically
+/// interacted items to candidate items, then selects top-n recommendations.
+///
+/// # Algorithm
+/// For each user:
+/// 1. Get user's historical interactions from the sparse matrix
+/// 2. For each interacted item, look up its similar items (neighbors)
+/// 3. Aggregate scores: score[candidate] += sim(item, candidate) * interaction_label
+/// 4. Filter out already-consumed items (if enabled)
+/// 5. Select top n_rec items by aggregated score (or random sampling)
+///
+/// # Arguments
+/// * `py` - Python interpreter reference
+/// * `users` - List of user IDs to generate recommendations for
+/// * `n_rec` - Number of items to recommend per user
+/// * `filter_consumed` - If true, exclude items the user has already interacted with
+/// * `random_rec` - If true, randomly sample from candidates; if false, select by score
+/// * `k_sim` - Number of similar items to consider per interacted item
+/// * `user_consumed` - Map of user_id -> list of consumed item_ids
+/// * `user_interactions` - Sparse matrix of user interactions (user_id -> [(item_id, label)])
+/// * `item_sims` - Pre-computed item similarities: item_id -> sorted neighbors
+///
+/// # Returns
+/// Tuple of (recommendations, additional_counts):
+/// * recommendations: Vec of PyList, each containing recommended item IDs for a user
+/// * additional_counts: PyList of how many more items needed to reach n_rec per user
 #[rustfmt::skip]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recommend_by_item_sims<'py>(
@@ -202,31 +229,17 @@ mod tests {
         // rating task: weighted average
         // top 2 by sim: id=4 (sim=0.8, label=3.0), id=2 (sim=0.6, label=4.0)
         // pred = (0.8*3.0 + 0.6*4.0) / (0.8 + 0.6) = 4.8 / 1.4
-        let pred = predict_single(&neighbors, interactions.into_iter(), 2, "rating")?;
+        let pred = predict_single(&neighbors, interactions.clone().into_iter(), 2, "rating")?;
         assert!((pred - 4.8 / 1.4).abs() < 1e-6);
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_compute_pred() -> PyResult<()> {
-        let k_neighbor_sims = vec![0.1, 0.2, 0.3];
-        let k_neighbor_labels = vec![2.0, 4.0, 1.0];
-        let pred = compute_pred("rating", &k_neighbor_sims, &k_neighbor_labels);
-        assert!(pred.is_ok());
-        assert!((pred? - 2.166_666_7).abs() < 1e-4);
-
-        let pred = compute_pred("ranking", &k_neighbor_sims, &k_neighbor_labels);
-        assert!(pred.is_ok());
-        assert_eq!(pred?, 0.2);
-
-        pyo3::prepare_freethreaded_python();
-        let pred = compute_pred("unknown", &k_neighbor_sims, &k_neighbor_labels);
+        // unknown task type
+        let pred = predict_single(&neighbors, interactions.into_iter(), 2, "unknown");
         assert!(pred.is_err());
         assert_eq!(
             pred.unwrap_err().to_string(),
             "ValueError: Unknown task type: \"unknown\""
         );
+
         Ok(())
     }
 
