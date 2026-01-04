@@ -10,13 +10,13 @@ from endrs.data.batch import BatchData, EvalBatchData
 from endrs.data.consumed import interaction_consumed, merge_consumed_data
 from endrs.data.data_info import DataInfo, IdConverter
 from endrs.feature.feat_info import FeatInfo
-from endrs.types import ItemId
+from endrs.types import ItemId, RecModel
 from endrs.utils.constants import ITEM_KEY, OOV_IDX, USER_KEY
 from endrs.utils.hashing import Hasher
 from endrs.utils.validate import check_data_cols, check_feat_cols
 
 if TYPE_CHECKING:
-    from endrs.algorithms.swing import Swing
+    from endrs.bases.cf_base import CfBase
     from endrs.bases.torch_base import TorchBase
 
 
@@ -394,14 +394,14 @@ class Dataset:
         pop_num: int = 100,
         seed: int = 42,
         *,
-        model: "TorchBase | Swing",
+        model: RecModel,
     ) -> "HashDataset | ExtendableDataset":
         """Create a dataset for retraining from an existing model.
         
         This factory method creates the appropriate dataset type based on the model
         architecture and data representation requirements:
         - TorchBase models with hash-based data → HashDataset
-        - Swing models without hash-based data → ExtendableDataset
+        - CfBase models without hash-based data → ExtendableDataset
 
         Parameters
         ----------
@@ -419,7 +419,7 @@ class Dataset:
             Number of popular items to consider
         seed : int, default: 42
             Random seed for reproducibility
-        model : TorchBase or Swing
+        model : :type:`~endrs.types.RecModel`
             Existing trained model to create retraining dataset from
 
         Returns
@@ -427,12 +427,12 @@ class Dataset:
         HashDataset or ExtendableDataset
             Dataset instance appropriate for the model type
         """
-        from endrs.algorithms.swing import Swing
+        from endrs.bases.cf_base import CfBase
         from endrs.bases.torch_base import TorchBase
 
-        if not isinstance(model, (TorchBase, Swing)):
+        if not isinstance(model, (TorchBase, CfBase)):
             raise TypeError(
-                f"Model must be a subclass of TorchBase or Swing, got {type(model).__name__}"
+                f"Model must be a subclass of TorchBase or CfBase, got {type(model).__name__}"
             )
 
         if isinstance(model, TorchBase):
@@ -440,6 +440,7 @@ class Dataset:
                 raise ValueError(
                     "TorchBase model must use hash-based data representation for retraining."
                 )
+
             return HashDataset.for_retrain(
                 model=model,
                 user_col_name=user_col_name,
@@ -451,11 +452,12 @@ class Dataset:
                 seed=seed,
             )
 
-        if isinstance(model, Swing):
+        if isinstance(model, CfBase):
             if model.data_info.use_hash:
                 raise ValueError(
-                    "Swing model cannot use hash-based data representation for retraining."
+                    "CfBase model cannot use hash-based data representation for retraining."
                 )
+
             return ExtendableDataset(
                 model=model,
                 user_col_name=user_col_name,
@@ -477,7 +479,7 @@ class ExtendableDataset(Dataset):
     
     def __init__(
         self,
-        model: "Swing",
+        model: "CfBase",
         user_col_name: str,
         item_col_name: str,
         label_col_name: str | None = None,
