@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, ClassVar, TypeVar
+from typing import Callable, ClassVar, Literal, TypeVar
 
 import joblib
 import numpy as np
@@ -45,6 +45,7 @@ class _ModelConfig:
     display_name: str
     save_fn: Callable[[RustModel, str, str], None]
     load_fn: Callable[[str, str], RustModel]
+    is_user_based: bool
 
 
 _MODEL_CONFIGS: dict[str, _ModelConfig] = {
@@ -52,16 +53,19 @@ _MODEL_CONFIGS: dict[str, _ModelConfig] = {
         display_name="UserCF",
         save_fn=save_user_cf,
         load_fn=load_user_cf,
+        is_user_based=True,
     ),
     "item_cf": _ModelConfig(
         display_name="ItemCF",
         save_fn=save_item_cf,
         load_fn=load_item_cf,
+        is_user_based=False,
     ),
     "swing": _ModelConfig(
         display_name="Swing",
         save_fn=save_swing,
         load_fn=load_swing,
+        is_user_based=False,
     ),
 }
 
@@ -100,6 +104,18 @@ class CfBase(ABC):
         self.seed = seed
         self.np_rng = np.random.default_rng(seed)
         self.rs_model: RustModel | None = None
+
+    @property
+    def is_fitted(self) -> bool:
+        """Check if the model has been trained."""
+        return self.rs_model is not None
+
+    def _check_fitted(self) -> None:
+        """Raise an error if the model has not been trained."""
+        if not self.is_fitted:
+            raise RuntimeError(
+                "Model must be trained before this operation. Call fit() first."
+            )
 
     @abstractmethod
     def _create_rust_model(
@@ -154,7 +170,9 @@ class CfBase(ABC):
             Setting it to a positive number will sample users randomly from eval data.
         """
         check_labels(self.task, train_data.labels, neg_sampling)
-        show_start_time()
+        if verbose > 0:
+            show_start_time()
+
         user_interacts, item_interacts = construct_sparse(train_data)
 
         if self.rs_model is None:
@@ -188,7 +206,7 @@ class CfBase(ABC):
     def _log_similarity_stats(self) -> None:
         """Log similarity matrix statistics."""
         num = self.rs_model.num_sim_elements()
-        base = self.n_users if self._cfg.display_name == "UserCF" else self.n_items
+        base = self.n_users if self._cfg.is_user_based else self.n_items
         density_ratio = 100 * num / base / base
         normal_log(
             f"{self._cfg.display_name} num_elements: {num}, density: {density_ratio:5.4f} %"
@@ -198,7 +216,7 @@ class CfBase(ABC):
         self,
         eval_data: EvalBatchData | pd.DataFrame,
         neg_sampling: bool,
-        metrics: Sequence[str] | None = None,
+        metrics: str | Sequence[str] | None = None,
         k: int = 10,
         eval_batch_size: int = 8192,
         eval_user_num: int | None = None,
@@ -233,11 +251,7 @@ class CfBase(ABC):
         RuntimeError
             If the model hasn't been trained yet.
         """
-        if self.rs_model is None:
-            raise RuntimeError(
-                "Model must be trained before evaluation. Call fit() first."
-            )
-
+        self._check_fitted()
         evaluator = Evaluator(
             during_training=False,
             data=eval_data,
@@ -257,7 +271,7 @@ class CfBase(ABC):
         self,
         user: UserId | list[UserId] | np.ndarray,
         item: ItemId | list[ItemId] | np.ndarray,
-        cold_start: str = "popular",
+        cold_start: Literal["popular"] = "popular",
         inner_id: bool = False,
     ) -> list[float]:
         """Predict ratings or scores for user-item pairs.
@@ -268,7 +282,7 @@ class CfBase(ABC):
             User id or batch of user ids.
         item : :type:`~endrs.types.ItemId` or list[ItemId] or np.ndarray
             Item id or batch of item ids.
-        cold_start : {'popular', 'default'}, default: 'popular'
+        cold_start : {'popular'}
             Strategy for handling cold-start users/items.
         inner_id : bool, default: False
             Whether the provided IDs are internal IDs.
@@ -278,6 +292,7 @@ class CfBase(ABC):
         list[float]
             Predicted scores for each user-item pair.
         """
+        self._check_fitted()
         user, item = convert_ids(user, item, self.id_converter, inner_id)
         unknown_num, _ = get_unknown(user, item)
         if unknown_num > 0 and cold_start != "popular":
@@ -291,7 +306,7 @@ class CfBase(ABC):
         self,
         user: UserId | list[UserId] | np.ndarray,
         n_rec: int,
-        cold_start: str = "popular",
+        cold_start: Literal["popular"] = "popular",
         inner_id: bool = False,
         filter_consumed: bool = True,
         random_rec: bool = False,
@@ -304,7 +319,7 @@ class CfBase(ABC):
             User id or a batch of user ids to recommend.
         n_rec : int
             Number of recommendations to generate.
-        cold_start : str, default: 'popular'
+        cold_start : {'popular'}
             Strategy for handling cold-start users.
         inner_id : bool, default: False
             Whether to use inner_id defined in `endrs`.
@@ -318,6 +333,7 @@ class CfBase(ABC):
         dict[UserId, list[ItemId]]
             Dictionary mapping user IDs to list of recommended item IDs.
         """
+        self._check_fitted()
         result_recs = {}
         user_ids, unknown_users = sep_unknown_users(self.id_converter, user, inner_id)
 
@@ -362,8 +378,7 @@ class CfBase(ABC):
         model_name : str
             Name of the model file (without extension).
         """
-        if self.rs_model is None:
-            raise ValueError("Model must be trained before saving")
+        self._check_fitted()
 
         save_dir = Path(path)
         save_dir.mkdir(parents=True, exist_ok=True)
