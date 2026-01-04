@@ -1,5 +1,8 @@
+from typing import ClassVar, Literal
+
 from endrs.bases.cf_base import CfBase
 from endrs.data.data_info import DataInfo
+from endrs.utils.sparse import SparseMatrix
 from endrs_ext import Swing as RsSwing
 
 
@@ -28,11 +31,11 @@ class Swing(CfBase):
         Random seed for reproducibility.
     """
 
-    model_type = "swing"
+    model_type: ClassVar[str] = "swing"
 
     def __init__(
         self,
-        task: str,
+        task: Literal["ranking"],
         data_info: DataInfo,
         top_k: int = 20,
         alpha: float = 0.1,
@@ -40,7 +43,9 @@ class Swing(CfBase):
         num_threads: int = 1,
         seed: int = 42,
     ):
-        assert task == "ranking", "Swing only supports ranking task."
+        if task != "ranking":
+            raise ValueError(f"Swing only supports ranking task, got {task!r}")
+
         super().__init__(task, data_info, num_threads, seed)
         self.top_k = top_k
         self.alpha = alpha
@@ -48,8 +53,8 @@ class Swing(CfBase):
 
     def _create_rust_model(
         self,
-        user_interacts: list[list[tuple[int, float]]],
-        item_interacts: list[list[tuple[int, float]]],
+        user_interacts: SparseMatrix,
+        item_interacts: SparseMatrix,
     ) -> RsSwing:
         return RsSwing(
             self.top_k,

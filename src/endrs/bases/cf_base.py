@@ -1,9 +1,10 @@
 """Base class for collaborative filtering models (UserCF, ItemCF, Swing)."""
 
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Self
+from typing import Callable, ClassVar, TypeVar
 
 import joblib
 import numpy as np
@@ -18,7 +19,7 @@ from endrs.inference.preprocess import convert_ids, get_unknown, sep_unknown_use
 from endrs.types import ItemId, RustModel, UserId
 from endrs.utils.logger import normal_log
 from endrs.utils.misc import show_start_time, time_block
-from endrs.utils.sparse import construct_sparse
+from endrs.utils.sparse import SparseMatrix, construct_sparse
 from endrs.utils.validate import check_labels
 from endrs_ext import (
     load_item_cf,
@@ -29,13 +30,20 @@ from endrs_ext import (
     save_user_cf,
 )
 
+# Type variable bound to CfBase and its subclasses (UserCF, ItemCF, Swing).
+# Used in classmethods like `load()` to preserve the concrete subclass type:
+#   - `Swing.load(...)` returns `Swing`, not `CfBase`
+#   - `UserCF.load(...)` returns `UserCF`, not `CfBase`
+# This enables proper type inference and IDE autocompletion for loaded models.
+_CfT = TypeVar("_CfT", bound="CfBase")
+
 
 @dataclass(frozen=True)
 class _ModelConfig:
     """Configuration for a specific CF model type."""
 
     display_name: str
-    save_fn: Callable[[Any, str, str], None]
+    save_fn: Callable[[RustModel, str, str], None]
     load_fn: Callable[[str, str], RustModel]
 
 
@@ -58,13 +66,21 @@ _MODEL_CONFIGS: dict[str, _ModelConfig] = {
 }
 
 
-class CfBase:
+class CfBase(ABC):
     """Internal base class for collaborative filtering models.
 
     This class should not be instantiated directly. Use UserCF, ItemCF, or Swing instead.
     """
 
-    model_type: str
+    model_type: ClassVar[str]
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if not hasattr(cls, "model_type") or cls.model_type not in _MODEL_CONFIGS:
+            raise TypeError(
+                f"{cls.__name__} must define a valid model_type class attribute "
+                f"(one of {list(_MODEL_CONFIGS.keys())})"
+            )
 
     def __init__(
         self,
@@ -73,12 +89,6 @@ class CfBase:
         num_threads: int = 1,
         seed: int = 42,
     ):
-        if not hasattr(self, "model_type") or self.model_type not in _MODEL_CONFIGS:
-            raise TypeError(
-                f"{self.__class__.__name__} cannot be instantiated directly. "
-                "Use UserCF, ItemCF, or Swing instead."
-            )
-
         self._cfg = _MODEL_CONFIGS[self.model_type]
         self.task = task
         self.data_info = data_info
@@ -91,13 +101,14 @@ class CfBase:
         self.np_rng = np.random.default_rng(seed)
         self.rs_model: RustModel | None = None
 
+    @abstractmethod
     def _create_rust_model(
         self,
-        user_interacts: list[list[tuple[int, float]]],
-        item_interacts: list[list[tuple[int, float]]],
+        user_interacts: SparseMatrix,
+        item_interacts: SparseMatrix,
     ) -> RustModel:
         """Create the Rust model. Subclasses must override this method."""
-        raise NotImplementedError("Subclasses must implement _create_rust_model")
+        ...
 
     def fit(
         self,
@@ -307,7 +318,7 @@ class CfBase:
         dict[UserId, list[ItemId]]
             Dictionary mapping user IDs to list of recommended item IDs.
         """
-        result_recs = dict()
+        result_recs = {}
         user_ids, unknown_users = sep_unknown_users(self.id_converter, user, inner_id)
 
         if unknown_users:
@@ -354,20 +365,21 @@ class CfBase:
         if self.rs_model is None:
             raise ValueError("Model must be trained before saving")
 
-        path = Path(path) / model_name
-        path.parent.mkdir(parents=True, exist_ok=True)
+        save_dir = Path(path)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / model_name
 
         model_state = {
             k: v
             for k, v in self.__dict__.items()
             if k not in ("rs_model", "_cfg", "np_rng")
         }
-        joblib.dump(model_state, f"{path}.joblib")
+        joblib.dump(model_state, f"{save_path}.joblib")
 
-        self._cfg.save_fn(self.rs_model, str(path.parent), model_name)
+        self._cfg.save_fn(self.rs_model, str(save_dir), model_name)
 
     @classmethod
-    def load(cls, path: str | Path, model_name: str) -> Self:
+    def load(cls: type[_CfT], path: str | Path, model_name: str) -> _CfT:
         """Load a trained model from disk.
 
         Parameters
@@ -379,11 +391,12 @@ class CfBase:
 
         Returns
         -------
-        Self
+        _CfT
             Loaded model instance.
         """
-        path = Path(path) / model_name
-        model_state = joblib.load(f"{path}.joblib")
+        load_dir = Path(path)
+        load_path = load_dir / model_name
+        model_state = joblib.load(f"{load_path}.joblib")
 
         model = cls.__new__(cls)
         model.__dict__.update(model_state)
@@ -393,7 +406,7 @@ class CfBase:
         model._cfg = _MODEL_CONFIGS[model.model_type]
 
         model.np_rng = np.random.default_rng(model.seed)
-        model.rs_model = model._cfg.load_fn(str(path.parent), model_name)
+        model.rs_model = model._cfg.load_fn(str(load_dir), model_name)
         return model
 
     def update_data_info(self, data_info: DataInfo):

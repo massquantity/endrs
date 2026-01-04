@@ -1,5 +1,8 @@
+from typing import ClassVar, Literal
+
 from endrs.bases.cf_base import CfBase
 from endrs.data.data_info import DataInfo
+from endrs.utils.sparse import SparseMatrix
 from endrs_ext import ItemCF as RsItemCF
 
 
@@ -22,11 +25,11 @@ class ItemCF(CfBase):
         Random seed for reproducibility.
     """
 
-    model_type = "item_cf"
+    model_type: ClassVar[str] = "item_cf"
 
     def __init__(
         self,
-        task: str,
+        task: Literal["rating", "ranking"],
         data_info: DataInfo,
         k_sim: int = 20,
         min_common: int = 1,
@@ -39,8 +42,8 @@ class ItemCF(CfBase):
 
     def _create_rust_model(
         self,
-        user_interacts: list[list[tuple[int, float]]],
-        item_interacts: list[list[tuple[int, float]]],
+        user_interacts: SparseMatrix,
+        item_interacts: SparseMatrix,
     ) -> RsItemCF:
         return RsItemCF(
             self.task,
