@@ -44,25 +44,16 @@ _MODEL_CONFIGS: dict[str, _ModelConfig] = {
         display_name="UserCF",
         save_fn=save_user_cf,
         load_fn=load_user_cf,
-        density_base="users",
-        compute_block_name="UserCF computing similarities",
-        update_block_name="update UserCF",
     ),
     "item_cf": _ModelConfig(
         display_name="ItemCF",
         save_fn=save_item_cf,
         load_fn=load_item_cf,
-        density_base="items",
-        compute_block_name="ItemCF computing similarities",
-        update_block_name="update ItemCF",
     ),
     "swing": _ModelConfig(
         display_name="Swing",
         save_fn=save_swing,
         load_fn=load_swing,
-        density_base="items",
-        compute_block_name="swing computing",
-        update_block_name="update swing",
     ),
 }
 
@@ -107,33 +98,6 @@ class CfBase:
     ) -> RustModel:
         """Create the Rust model. Subclasses must override this method."""
         raise NotImplementedError("Subclasses must implement _create_rust_model")
-
-    def _compute_similarities(self) -> None:
-        """Compute similarities/swing weights for the model."""
-        if self.model_type == "swing":
-            self.rs_model.compute_swing(self.num_threads)
-        else:  # user_cf, item_cf
-            self.rs_model.compute_similarities(self.num_threads)
-
-    def _update_similarities(
-        self,
-        user_interacts: list[list[tuple[int, float]]],
-        item_interacts: list[list[tuple[int, float]]],
-    ) -> None:
-        """Update similarities/swing weights with new interaction data."""
-        if self.model_type == "swing":
-            self.rs_model.update_swing(user_interacts, item_interacts, self.num_threads)
-        else:  # user_cf, item_cf
-            self.rs_model.update_similarities(
-                user_interacts, item_interacts, self.num_threads
-            )
-
-    def _num_elements(self) -> int:
-        """Get the number of similarity/swing elements."""
-        if self.model_type == "swing":
-            return self.rs_model.num_swing_elements()
-        else:  # user_cf, item_cf
-            return self.rs_model.num_sim_elements()
 
     def fit(
         self,
@@ -184,18 +148,15 @@ class CfBase:
 
         if self.rs_model is None:
             self.rs_model = self._create_rust_model(user_interacts, item_interacts)
-            with time_block(self._cfg.compute_block_name, verbose=1):
-                self._compute_similarities()
+            with time_block("computing similarities", verbose=1):
+                self.rs_model.compute_similarities(self.num_threads)
         else:
-            with time_block(self._cfg.update_block_name, verbose=1):
-                self._update_similarities(user_interacts, item_interacts)
+            with time_block("updating similarities", verbose=1):
+                self.rs_model.update_similarities(
+                    user_interacts, item_interacts, self.num_threads
+                )
 
-        num = self._num_elements()
-        base = self.n_users if self._cfg.density_base == "users" else self.n_items
-        density_ratio = 100 * num / (base * base)
-        normal_log(
-            f"{self._cfg.display_name} num_elements: {num}, density: {density_ratio:5.4f} %"
-        )
+        self._log_similarity_stats()
 
         if eval_data is not None and verbose >= 1:
             evaluator = Evaluator(
@@ -212,6 +173,15 @@ class CfBase:
                 verbose=verbose,
             )
             evaluator.log_metrics(epoch=0)
+
+    def _log_similarity_stats(self) -> None:
+        """Log similarity matrix statistics."""
+        num = self.rs_model.num_sim_elements()
+        base = self.n_users if self._cfg.display_name == "UserCF" else self.n_items
+        density_ratio = 100 * num / base / base
+        normal_log(
+            f"{self._cfg.display_name} num_elements: {num}, density: {density_ratio:5.4f} %"
+        )
 
     def evaluate(
         self,
@@ -357,12 +327,12 @@ class CfBase:
                 filter_consumed,
                 random_rec,
             )
-            for rec, arc in zip(computed_recs, additional_rec_counts):
+            for i, arc in enumerate(additional_rec_counts):
                 if arc > 0:
                     additional_recs = popular_recommendations(
                         self.data_info, inner_id=True, n_rec=arc, np_rng=self.np_rng
                     )
-                    rec.extend(additional_recs)
+                    computed_recs[i].extend(additional_recs)
 
             user_recs = construct_rec(
                 self.id_converter, user_ids, computed_recs, inner_id
@@ -388,7 +358,9 @@ class CfBase:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         model_state = {
-            k: v for k, v in self.__dict__.items() if k not in ("rs_model", "_cfg")
+            k: v
+            for k, v in self.__dict__.items()
+            if k not in ("rs_model", "_cfg", "np_rng")
         }
         joblib.dump(model_state, f"{path}.joblib")
 
