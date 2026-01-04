@@ -75,7 +75,7 @@ impl PySwing {
         })
     }
 
-    fn compute_swing(&mut self, num_threads: usize) -> PyResult<()> {
+    fn compute_similarities(&mut self, num_threads: usize) -> PyResult<()> {
         let pool = create_thread_pool(num_threads)?;
         self.item_swing_sims.clear();
 
@@ -90,7 +90,7 @@ impl PySwing {
     }
 
     /// update on new sparse interactions
-    fn update_swing(
+    fn update_similarities(
         &mut self,
         user_interactions: &Bound<'_, PyAny>,
         item_interactions: &Bound<'_, PyAny>,
@@ -122,10 +122,10 @@ impl PySwing {
         Ok(())
     }
 
-    fn num_swing_elements(&self) -> PyResult<usize> {
+    fn num_sim_elements(&self) -> PyResult<usize> {
         if self.item_swing_sims.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "call `compute_swing` method before calling `num_swing_elements`",
+                "call `compute_similarities` method before calling `num_sim_elements`",
             ));
         }
 
@@ -266,7 +266,7 @@ mod tests {
                 &item_interactions,
                 &user_consumed,
             )?;
-            swing.compute_swing(2)?;
+            swing.compute_similarities(2)?;
             Ok(swing)
         })?;
         Ok(swing)
