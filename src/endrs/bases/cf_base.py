@@ -15,7 +15,7 @@ from endrs.evaluation.evaluator import Evaluator
 from endrs.inference.cold_start import popular_recommendations
 from endrs.inference.postprocess import construct_rec
 from endrs.inference.preprocess import convert_ids, get_unknown, sep_unknown_users
-from endrs.types import ItemId, UserId
+from endrs.types import ItemId, RustModel, UserId
 from endrs.utils.logger import normal_log
 from endrs.utils.misc import show_start_time, time_block
 from endrs.utils.sparse import construct_sparse
@@ -36,10 +36,7 @@ class _ModelConfig:
 
     display_name: str
     save_fn: Callable[[Any, str, str], None]
-    load_fn: Callable[[str, str], Any]
-    density_base: str  # "users" or "items"
-    compute_block_name: str
-    update_block_name: str
+    load_fn: Callable[[str, str], RustModel]
 
 
 _MODEL_CONFIGS: dict[str, _ModelConfig] = {
@@ -76,7 +73,7 @@ class CfBase:
     This class should not be instantiated directly. Use UserCF, ItemCF, or Swing instead.
     """
 
-    model_type: str  # Must be defined by subclasses
+    model_type: str
 
     def __init__(
         self,
@@ -90,6 +87,7 @@ class CfBase:
                 f"{self.__class__.__name__} cannot be instantiated directly. "
                 "Use UserCF, ItemCF, or Swing instead."
             )
+
         self._cfg = _MODEL_CONFIGS[self.model_type]
         self.task = task
         self.data_info = data_info
@@ -100,13 +98,13 @@ class CfBase:
         self.num_threads = num_threads
         self.seed = seed
         self.np_rng = np.random.default_rng(seed)
-        self.rs_model = None
+        self.rs_model: RustModel | None = None
 
     def _create_rust_model(
         self,
         user_interacts: list[list[tuple[int, float]]],
         item_interacts: list[list[tuple[int, float]]],
-    ) -> Any:
+    ) -> RustModel:
         """Create the Rust model. Subclasses must override this method."""
         raise NotImplementedError("Subclasses must implement _create_rust_model")
 
