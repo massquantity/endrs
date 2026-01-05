@@ -10,6 +10,7 @@ SEQ_KEY: Final[str] = sys.intern("__seq__")
 # HASH_KEY: Final[str] = "__hash_inputs__"
 OOV_IDX: Final[int] = 0
 DEFAULT_PRED: Final[float] = 0.0
+DEFAULT_HASH_BINS: Final[int] = 200_000
 
 POINTWISE_LOSS = ("cross_entropy", "focal")
 PAIRWISE_LOSS = ("bpr", "max_margin")

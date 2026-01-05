@@ -11,7 +11,7 @@ from endrs.data.consumed import interaction_consumed, merge_consumed_data
 from endrs.data.data_info import DataInfo, IdConverter
 from endrs.feature.feat_info import FeatInfo
 from endrs.types import ItemId, RecModel
-from endrs.utils.constants import ITEM_KEY, OOV_IDX, USER_KEY
+from endrs.utils.constants import DEFAULT_HASH_BINS, ITEM_KEY, OOV_IDX, USER_KEY
 from endrs.utils.hashing import Hasher
 from endrs.utils.validate import check_data_cols, check_feat_cols
 
@@ -156,12 +156,7 @@ class Dataset:
             .groupby(self.item_col_name)[self.user_col_name]
             .count()
         )
-        selected_items = count_items.sort_values(ascending=False).index.tolist()
-        # if not enough items, add old populars
-        # if len(selected_items) < num and self.old_info is not None:
-        #    diff = num - len(selected_items)
-        #    selected_items.extend(self.old_info.popular_items[:diff])
-        return selected_items[:self.pop_num]
+        return count_items.nlargest(self.pop_num).index.tolist()
 
     def process_features(
         self,
@@ -243,18 +238,30 @@ class Dataset:
         user_sparse_cols: Sequence[str] | None,
         item_sparse_cols: Sequence[str] | None,
     ) -> dict[str, np.ndarray]:
-        def _compute_unique(feat_data, sparse_cols, name):
+        """Extract sorted unique values for each sparse column."""
+
+        def _compute_unique(
+            feat_data: pd.DataFrame | None,
+            sparse_cols: Sequence[str] | None,
+            name: str,
+        ) -> dict[str, np.ndarray]:
+            result = {}
             if feat_data is None or not sparse_cols:
-                return
+                return result
             for col in sparse_cols:
                 if col in feat_data:
-                    sparse_unique_vals[col] = np.sort(feat_data[col].unique())
+                    result[col] = np.sort(feat_data[col].unique())
                 else:
                     raise ValueError(f"`{col}` does not exist in {name} feat data.")
+            return result
 
-        sparse_unique_vals = dict()
-        _compute_unique(user_feat_data, user_sparse_cols, "user")
-        _compute_unique(item_feat_data, item_sparse_cols, "item")
+        sparse_unique_vals = {}
+        sparse_unique_vals.update(
+            _compute_unique(user_feat_data, user_sparse_cols, "user")
+        )
+        sparse_unique_vals.update(
+            _compute_unique(item_feat_data, item_sparse_cols, "item")
+        )
         return sparse_unique_vals
 
     @staticmethod
@@ -271,16 +278,21 @@ class Dataset:
             multi_sparse_cols: Sequence[Sequence[str]] | None,
             pad_val: int | str | list | tuple,
             name: str,
-        ):
+        ) -> dict[str, np.ndarray]:
+            result = {}
             if feat_data is None or not multi_sparse_cols:
-                return
+                return result
+
             for field in multi_sparse_cols:
                 if not field:
                     raise ValueError(f"{name} multi_sparse_cols has invalid field: {field}")
+
             if not isinstance(pad_val, list | tuple):
                 pad_val = [pad_val] * len(multi_sparse_cols)
+
             if len(multi_sparse_cols) != len(pad_val):
                 raise ValueError("Length of `multi_sparse_col` and `pad_val` doesn't match")
+
             for i, field in enumerate(multi_sparse_cols):
                 for col in field:
                     if col not in feat_data:
@@ -290,11 +302,20 @@ class Dataset:
                 if pad_val[i] in unique_vals:
                     unique_vals.remove(pad_val[i])
                 # use name of a field's first column as representative
-                multi_sparse_unique_vals[field[0]] = np.sort(list(unique_vals))
+                result[field[0]] = np.sort(list(unique_vals))
+            return result
 
-        multi_sparse_unique_vals = dict()
-        _compute_unique(user_feat_data, user_multi_sparse_cols, user_pad_val, "user")
-        _compute_unique(item_feat_data, item_multi_sparse_cols, item_pad_val, "item")
+        multi_sparse_unique_vals = {}
+        multi_sparse_unique_vals.update(
+            _compute_unique(
+                user_feat_data, user_multi_sparse_cols, user_pad_val, "user"
+            )
+        )
+        multi_sparse_unique_vals.update(
+            _compute_unique(
+                item_feat_data, item_multi_sparse_cols, item_pad_val, "item"
+            )
+        )
         return multi_sparse_unique_vals
 
     def extract_unique_features(
@@ -324,7 +345,9 @@ class Dataset:
             mapping = self.id_converter.item2id
 
         feat_ids = feat_data[col_name]
-        assert feat_ids.is_unique, f"{name} feat data must have unique ids."
+        if not feat_ids.is_unique:
+            raise ValueError(f"{name} feat data must have unique ids.")
+
         feat_id_set = set(feat_ids.tolist())
         for i in unique_ids:
             if i not in feat_id_set:
@@ -571,7 +594,7 @@ class HashDataset(Dataset):
         Number of popular items to track.
     seed : int, default: 42
         Random seed for reproducibility and hashing.
-    n_hash_bins : int, default: 200_000
+    n_hash_bins : int, default: DEFAULT_HASH_BINS (200_000)
         Number of hash bins for ID mapping. Larger values reduce collisions
         but increase memory usage.
 
@@ -593,7 +616,7 @@ class HashDataset(Dataset):
         shuffle: bool = False,
         pop_num: int = 100,
         seed: int = 42,
-        n_hash_bins: int = 200_000,
+        n_hash_bins: int = DEFAULT_HASH_BINS,
     ):
         super().__init__(
             user_col_name,
@@ -699,7 +722,10 @@ class HashDataset(Dataset):
             ITEM_KEY, item_unique_vals.tolist(), include_reverse=True
         )
         if self.retrain:
-            assert self.id_converter is not None
+            if self.id_converter is None:
+                raise RuntimeError(
+                    "id_converter must be set before calling this method in retrain mode"
+                )
             return self.id_converter.update(user2id, item2id, id2user, id2item)
         else:
             return IdConverter(user2id, item2id, id2user, id2item)
