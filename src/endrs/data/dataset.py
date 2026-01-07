@@ -21,6 +21,41 @@ if TYPE_CHECKING:
 
 
 class Dataset:
+    """Dataset class for building and managing recommendation data.
+
+    Parameters
+    ----------
+    user_col_name : str
+        Name of the user ID column in the data.
+    item_col_name : str
+        Name of the item ID column in the data.
+    label_col_name : str, optional
+        Name of the label column for supervised learning.
+    multi_label_col_names : Sequence[str], optional
+        Names of multiple label columns for multi-task learning.
+    shuffle : bool, default: False
+        Whether to shuffle data before processing.
+    pop_num : int, default: 100
+        Number of popular items to track.
+    seed : int, default: 42
+        Random seed for reproducibility.
+
+    Attributes
+    ----------
+    train_data : BatchData
+        Processed training data.
+    eval_data : EvalBatchData
+        Processed evaluation data.
+    test_data : EvalBatchData
+        Processed test data.
+    data_info : DataInfo
+        Metadata about the dataset.
+    feat_info : FeatInfo
+        Feature metadata and mappings.
+    id_converter : IdConverter
+        Converter between raw IDs and internal indices.
+    """
+
     def __init__(
         self,
         user_col_name: str,
@@ -48,9 +83,22 @@ class Dataset:
         self.train_called = False
 
     def remove_features(self):
+        """Clear feature information from the dataset."""
         self.feat_info = None
 
     def shuffle_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        """Shuffle DataFrame rows with a fixed random seed.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Data to shuffle.
+
+        Returns
+        -------
+        pd.DataFrame
+            Shuffled data with reset index.
+        """
         data = data.sample(frac=1, random_state=self.seed)
         return data.reset_index(drop=True)
 
@@ -60,6 +108,25 @@ class Dataset:
         eval_data: pd.DataFrame | None = None,
         test_data: pd.DataFrame | None = None,
     ):
+        """Build interaction data for training and evaluation.
+
+        Processes raw DataFrames into internal batch format, builds ID mappings,
+        and computes user/item consumed history and popular items.
+
+        Parameters
+        ----------
+        train_data : pd.DataFrame
+            Training data containing user-item interactions.
+        eval_data : pd.DataFrame, optional
+            Evaluation data for validation during training.
+        test_data : pd.DataFrame, optional
+            Test data for final evaluation.
+
+        Side Effects
+        ------------
+        Sets `train_data`, `eval_data`, `test_data`, `id_converter`, `data_info`,
+        and `train_called` attributes on the instance.
+        """
         check_data_cols(
             [train_data, eval_data, test_data],
             self.user_col_name,
@@ -67,6 +134,7 @@ class Dataset:
             self.label_col_name,
             self.multi_label_col_names,
         )
+
         if self.shuffle:
             train_data = self.shuffle_data(train_data)
             if eval_data is not None:
@@ -118,6 +186,30 @@ class Dataset:
         id_converter: IdConverter,
         is_train: bool
     ) -> BatchData | EvalBatchData:
+        """Convert a DataFrame into batch data for model consumption.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Raw interaction data.
+        user_col_name : str
+            Name of the user column.
+        item_col_name : str
+            Name of the item column.
+        label_col_name : str, optional
+            Name of the label column.
+        multi_label_col_names : Sequence[str], optional
+            Names of multiple label columns.
+        id_converter : IdConverter
+            Converter for mapping raw IDs to internal indices.
+        is_train : bool
+            Whether this is training data (determines return type).
+
+        Returns
+        -------
+        BatchData or EvalBatchData
+            Processed batch data with mapped indices and labels.
+        """
         user_indices = data[user_col_name].map(id_converter.safe_user_to_id).tolist()
         item_indices = data[item_col_name].map(id_converter.safe_item_to_id).tolist()
 
@@ -136,13 +228,29 @@ class Dataset:
     def _build_id_converter(
         self, user_unique_vals: np.ndarray, item_unique_vals: np.ndarray
     ) -> IdConverter:
+        """Build ID converter from unique user and item values."""
         user2id, id2user = self.make_id_mapping(user_unique_vals, include_reverse=True)
         item2id, id2item = self.make_id_mapping(item_unique_vals, include_reverse=True)
         return IdConverter(user2id, item2id, id2user, id2item)
 
     @staticmethod
     def make_id_mapping(unique_values: np.ndarray, include_reverse: bool = False):
-        # skip oov id 0
+        """Create mapping from raw values to internal IDs starting from 1.
+
+        Index 0 is reserved for OOV (out-of-vocabulary) values.
+
+        Parameters
+        ----------
+        unique_values : np.ndarray
+            Unique raw values to map.
+        include_reverse : bool, default: False
+            Whether to also return reverse mapping (ID to value).
+
+        Returns
+        -------
+        dict or tuple of dict
+            Forward mapping, or (forward, reverse) if include_reverse=True.
+        """
         unique_values = unique_values.tolist()
         ids = range(1, len(unique_values) + 1)
         if include_reverse:
@@ -151,6 +259,7 @@ class Dataset:
             return dict(zip(unique_values, ids))
 
     def _get_popular_items(self, train_data: pd.DataFrame) -> list[ItemId]:
+        """Get the most popular items by interaction count."""
         count_items = (
             train_data.drop_duplicates(subset=[self.user_col_name, self.item_col_name])
             .groupby(self.item_col_name)[self.user_col_name]
@@ -171,6 +280,51 @@ class Dataset:
         user_pad_val: int | str | Sequence = "missing",
         item_pad_val: int | str | Sequence = "missing",
     ):
+        """Process user and item features for model training.
+
+        Parameters
+        ----------
+        user_feat_data : pd.DataFrame, optional
+            DataFrame containing user features.
+        item_feat_data : pd.DataFrame, optional
+            DataFrame containing item features.
+        user_sparse_cols : Sequence[str], optional
+            Names of sparse categorical columns for users.
+        item_sparse_cols : Sequence[str], optional
+            Names of sparse categorical columns for items.
+        user_dense_cols : Sequence[str], optional
+            Names of dense numerical columns for users.
+        item_dense_cols : Sequence[str], optional
+            Names of dense numerical columns for items.
+        user_multi_sparse_cols : Sequence[Sequence[str]], optional
+            Names of multi-value sparse columns for users.
+        item_multi_sparse_cols : Sequence[Sequence[str]], optional
+            Names of multi-value sparse columns for items.
+        user_pad_val : int, str, or Sequence, default: "missing"
+            Padding value for user multi-sparse features.
+        item_pad_val : int, str, or Sequence, default: "missing"
+            Padding value for item multi-sparse features.
+
+        Processing Flow
+        ---------------
+        1. Extract unique values for sparse columns from user/item feature data
+        2. Extract unique values for multi-sparse columns, excluding padding values
+        3. Build sparse_val_to_idx mapping: {column_name: {value: index}}
+        4. For each feature DataFrame (user/item):
+           a. Map raw IDs to internal indices
+           b. Extract sparse feature indices as 1D arrays where position 0 holds OOV_IDX,
+              and subsequent positions correspond to internal entity IDs (1, 2, 3, ...).
+              This allows direct indexing: feat_array[entity_id] -> feature index.
+           c. Extract dense feature indices as 1D arrays where position 0 holds the
+              median value (for OOV entities), with the same indexing scheme as sparse.
+           d. Extract multi-sparse feature indices as 2D matrices of shape
+              (n_entities + 1, n_fields), where row 0 is the OOV row filled with
+              OOV_IDX, and subsequent rows correspond to internal entity IDs.
+
+        Side Effects
+        ------------
+        Sets `feat_info` attribute on the instance.
+        """
         if not self.train_called:
             raise RuntimeError("Trainset must be built before processing features.")
         check_feat_cols(
@@ -273,6 +427,12 @@ class Dataset:
         user_pad_val: int | str | Sequence,
         item_pad_val: int | str | Sequence,
     ) -> dict[str, np.ndarray]:
+        """Extract sorted unique values for multi-sparse columns, excluding padding.
+
+        The returned dict uses the first column name in each field (field[0])
+        as the representative key.
+        """
+
         def _compute_unique(
             feat_data: pd.DataFrame | None,
             multi_sparse_cols: Sequence[Sequence[str]] | None,
@@ -326,6 +486,33 @@ class Dataset:
         multi_sparse_cols: Sequence[Sequence[str]] | None,
         name: str,
     ) -> dict[str, np.ndarray]:
+        """Extract unique feature values for each user or item.
+
+        Maps raw IDs to internal indices and extracts feature values
+        for sparse, dense, and multi-sparse columns.
+
+        The `_map_ids` step sorts feat_data by internal ID, so row order matches
+        ID order (1, 2, 3, ...). This enables direct array indexing:
+        feat_array[entity_id] returns the feature for that entity.
+
+        Parameters
+        ----------
+        feat_data : pd.DataFrame
+            Feature data containing user/item ID and feature columns.
+        sparse_cols : Sequence[str], optional
+            Names of sparse categorical columns.
+        dense_cols : Sequence[str], optional
+            Names of dense numerical columns.
+        multi_sparse_cols : Sequence[Sequence[str]], optional
+            Names of multi-value sparse columns.
+        name : str
+            Either "user" or "item", used to determine ID mapping.
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            Dictionary mapping column names to unique feature arrays.
+        """
         feat_data = self._map_ids(feat_data, name)
         sparse_unique = self._extract_sparse_unique(feat_data, sparse_cols)
         dense_unique = self._extract_dense_unique(feat_data, dense_cols)
@@ -335,6 +522,7 @@ class Dataset:
         return {**sparse_unique, **dense_unique, **multi_sparse_unique}
 
     def _map_ids(self, feat_data: pd.DataFrame, name: str) -> pd.DataFrame:
+        """Map raw user/item IDs to internal indices and validate coverage."""
         if name.endswith("user"):
             col_name = self.user_col_name
             unique_ids = self.id_converter.unique_users
@@ -363,7 +551,8 @@ class Dataset:
     def _extract_sparse_unique(
         self, feat_data: pd.DataFrame, sparse_cols: Sequence[str] | None
     ) -> dict[str, np.ndarray]:
-        feat_unique = dict()
+        """Extract sparse feature arrays with OOV index at position 0."""
+        feat_unique = {}
         if not sparse_cols:
             return feat_unique
         for col in sparse_cols:
@@ -378,7 +567,8 @@ class Dataset:
         feat_data: pd.DataFrame,
         multi_sparse_cols: Sequence[Sequence[str]] | None,
     ) -> dict[str, np.ndarray]:
-        feat_unique = dict()
+        """Extract multi-sparse feature arrays as 2D matrices with OOV row at position 0."""
+        feat_unique = {}
         if not multi_sparse_cols:
             return feat_unique
         for field in multi_sparse_cols:
@@ -397,6 +587,7 @@ class Dataset:
     def _extract_dense_unique(
         feat_data: pd.DataFrame, dense_cols: Sequence[str] | None
     ) -> dict[str, np.ndarray]:
+        """Extract dense feature arrays with median as OOV value at position 0."""
         feat_unique = dict()
         if not dense_cols:
             return feat_unique
@@ -528,6 +719,12 @@ class ExtendableDataset(Dataset):
         eval_data: pd.DataFrame | None = None,
         test_data: pd.DataFrame | None = None,
     ):
+        """Build data and merge consumed history with the existing model.
+
+        After calling the parent's build_data, this method merges the new
+        consumed history with the model's existing consumed history and
+        updates the model's data_info.
+        """
         super().build_data(train_data, eval_data, test_data)
         user_consumed, item_consumed = merge_consumed_data(
             self.model.data_info.user_consumed,
@@ -542,7 +739,11 @@ class ExtendableDataset(Dataset):
     def _build_id_converter(
         self, new_user_vals: np.ndarray, new_item_vals: np.ndarray
     ) -> IdConverter:
-        """Extend existing ID converter with new users and items."""
+        """Extend existing ID converter with new users and items.
+
+        New users/items not in the existing model are assigned IDs starting
+        from max_existing_id + 1. The existing converter is updated in-place.
+        """
         existing_converter = self.model.data_info.id_converter
         existing_users = np.array(list(existing_converter.user2id.keys()))
         existing_items = np.array(list(existing_converter.item2id.keys()))
@@ -649,6 +850,10 @@ class HashDataset(Dataset):
     ) -> "HashDataset":
         """Create a HashDataset configured for incremental training.
 
+        This factory method copies n_hash_bins, id_converter, feat_unique, and
+        sparse_val_to_idx from the existing model, enabling the new dataset to
+        extend the model's vocabulary and features.
+
         Parameters
         ----------
         model : TorchBase
@@ -698,6 +903,7 @@ class HashDataset(Dataset):
         eval_data: pd.DataFrame | None = None,
         test_data: pd.DataFrame | None = None,
     ):
+        """Build data with hash-based ID mapping."""
         super().build_data(train_data, eval_data, test_data)
         self.data_info.use_hash = True
         self.data_info.n_hash_bins = self.n_hash_bins
@@ -715,6 +921,12 @@ class HashDataset(Dataset):
     def _build_id_converter(
         self, user_unique_vals: np.ndarray, item_unique_vals: np.ndarray
     ) -> IdConverter:
+        """Build ID converter using hash-based mapping.
+
+        Unlike the parent class which assigns sequential IDs, this method hashes
+        raw IDs to fixed bins. In retrain mode, the existing converter is updated
+        with new hash mappings rather than creating a new one.
+        """
         user2id, id2user = self.hasher.to_hash_mapping(
             USER_KEY, user_unique_vals.tolist(), include_reverse=True
         )
