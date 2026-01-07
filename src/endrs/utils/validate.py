@@ -200,6 +200,59 @@ def check_feat_cols(
             raise ValueError(f"`{item_col_name}` should not be included in `{col}`")
 
 
+def check_feat_data(
+    user_feat_data: pd.DataFrame | None,
+    item_feat_data: pd.DataFrame | None,
+    user_sparse_cols: Sequence[str] | None = None,
+    item_sparse_cols: Sequence[str] | None = None,
+    user_dense_cols: Sequence[str] | None = None,
+    item_dense_cols: Sequence[str] | None = None,
+    user_multi_sparse_cols: Sequence[Sequence[str]] | None = None,
+    item_multi_sparse_cols: Sequence[Sequence[str]] | None = None,
+):
+    """Check that feature columns have corresponding feature data.
+
+    Feature columns define what features to extract, but they require the actual
+    feature data (DataFrame) to extract values from. This validation ensures that
+    when feature columns are specified, the corresponding feature DataFrame is
+    also provided, preventing runtime errors during feature extraction.
+
+    Parameters
+    ----------
+    user_feat_data : pd.DataFrame or None
+        DataFrame containing user features.
+    item_feat_data : pd.DataFrame or None
+        DataFrame containing item features.
+    user_sparse_cols : Sequence[str] or None, default: None
+        Names of user sparse feature columns.
+    item_sparse_cols : Sequence[str] or None, default: None
+        Names of item sparse feature columns.
+    user_dense_cols : Sequence[str] or None, default: None
+        Names of user dense feature columns.
+    item_dense_cols : Sequence[str] or None, default: None
+        Names of item dense feature columns.
+    user_multi_sparse_cols : Sequence[Sequence[str]] or None, default: None
+        Names of user multi-sparse feature columns.
+    item_multi_sparse_cols : Sequence[Sequence[str]] or None, default: None
+        Names of item multi-sparse feature columns.
+
+    Raises
+    ------
+    ValueError
+        If feature columns are provided but corresponding feature data is None.
+    """
+    if user_feat_data is None:
+        if user_sparse_cols or user_dense_cols or user_multi_sparse_cols:
+            raise ValueError(
+                "user feature columns provided but user_feat_data is None"
+            )
+    if item_feat_data is None:
+        if item_sparse_cols or item_dense_cols or item_multi_sparse_cols:
+            raise ValueError(
+                "item feature columns provided but item_feat_data is None"
+            )
+
+
 def check_lr_scheduler_config(
     lr_scheduler: str, lr_scheduler_config: dict[str, Any]
 ) -> dict[str, Any]:

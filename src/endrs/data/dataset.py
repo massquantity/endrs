@@ -13,7 +13,7 @@ from endrs.feature.feat_info import FeatInfo
 from endrs.types import ItemId, RecModel
 from endrs.utils.constants import DEFAULT_HASH_BINS, ITEM_KEY, OOV_IDX, USER_KEY
 from endrs.utils.hashing import Hasher
-from endrs.utils.validate import check_data_cols, check_feat_cols
+from endrs.utils.validate import check_data_cols, check_feat_cols, check_feat_data
 
 if TYPE_CHECKING:
     from endrs.bases.cf_base import CfBase
@@ -335,6 +335,16 @@ class Dataset:
             item_sparse_cols,
             user_dense_cols,
             item_dense_cols,
+        )
+        check_feat_data(
+            user_feat_data,
+            item_feat_data,
+            user_sparse_cols,
+            item_sparse_cols,
+            user_dense_cols,
+            item_dense_cols,
+            user_multi_sparse_cols,
+            item_multi_sparse_cols,
         )
 
         sparse_unique_vals = self._get_sparse_unique_vals(
@@ -975,7 +985,9 @@ class HashDataset(Dataset):
         *_ : ignored
             Dense and multi-sparse parameters are ignored in hash mode.
         """
-        self._validate_feature_preconditions(user_sparse_cols, item_sparse_cols)
+        self._validate_feature_preconditions(
+            user_feat_data, item_feat_data, user_sparse_cols, item_sparse_cols
+        )
 
         sparse_unique_vals = self._get_sparse_unique_vals(
             user_feat_data, item_feat_data, user_sparse_cols, item_sparse_cols
@@ -1005,6 +1017,8 @@ class HashDataset(Dataset):
 
     def _validate_feature_preconditions(
         self,
+        user_feat_data: pd.DataFrame | None,
+        item_feat_data: pd.DataFrame | None,
         user_sparse_cols: Sequence[str] | None,
         item_sparse_cols: Sequence[str] | None,
     ):
@@ -1013,14 +1027,18 @@ class HashDataset(Dataset):
         Checks:
         1. Training data must be built first
         2. Feature columns don't conflict with user/item ID columns
-        3. In retrain mode, original model must have features
-        4. In retrain mode, feature columns must match original model
+        3. Feature columns require corresponding feat_data
+        4. In retrain mode, original model must have features
+        5. In retrain mode, feature columns must match original model
         """
         if not self.train_called:
             raise RuntimeError("Trainset must be built before processing features.")
 
         check_feat_cols(
             self.user_col_name, self.item_col_name, user_sparse_cols, item_sparse_cols
+        )
+        check_feat_data(
+            user_feat_data, item_feat_data, user_sparse_cols, item_sparse_cols
         )
 
         # Remaining checks only apply to retrain mode
