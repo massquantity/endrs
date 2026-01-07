@@ -56,8 +56,8 @@ class FeatInfo:
         self.item_dense_feats = item_dense_feats or []
         self.user_multi_sparse_all = user_multi_sparse_feats or []
         self.item_multi_sparse_all = item_multi_sparse_feats or []
-        self.feat_unique = feat_unique
-        self.sparse_val_to_idx = sparse_val_to_idx
+        self.feat_unique = feat_unique or None
+        self.sparse_val_to_idx = sparse_val_to_idx or None
         if user_multi_sparse_feats:
             self.multi_sparse_feat_to_main = self.mapping_multi_sparse_feat(
                 self.user_multi_sparse_all

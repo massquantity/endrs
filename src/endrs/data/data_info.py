@@ -1,5 +1,6 @@
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
+from typing import Self
 
 import numpy as np
 
@@ -34,11 +35,11 @@ class IdConverter:
         item2id: MutableMapping[ItemId, int],
         id2user: MutableMapping[int, UserId],
         id2item: MutableMapping[int, ItemId],
-    ):
-        self.user2id.update(user2id)
-        self.item2id.update(item2id)
-        self.id2user.update(id2user)
-        self.id2item.update(id2item)
+    ) -> Self:
+        self.user2id |= user2id
+        self.item2id |= item2id
+        self.id2user |= id2user
+        self.id2item |= id2item
         return self
 
 

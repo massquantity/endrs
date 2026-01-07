@@ -215,9 +215,9 @@ class Dataset:
 
         labels, multi_labels = None, None
         if label_col_name:
-            labels = data[label_col_name].astype("float32").tolist()
+            labels = data[label_col_name].astype(np.float32).tolist()
         if multi_label_col_names:
-            multi_labels = data[multi_label_col_names].astype("float32")
+            multi_labels = data[multi_label_col_names].astype(np.float32)
             multi_labels = multi_labels.to_numpy().tolist()
 
         if is_train:
@@ -327,6 +327,7 @@ class Dataset:
         """
         if not self.train_called:
             raise RuntimeError("Trainset must be built before processing features.")
+
         check_feat_cols(
             self.user_col_name,
             self.item_col_name,
@@ -335,6 +336,7 @@ class Dataset:
             user_dense_cols,
             item_dense_cols,
         )
+
         sparse_unique_vals = self._get_sparse_unique_vals(
             user_feat_data, item_feat_data, user_sparse_cols, item_sparse_cols
         )
@@ -346,33 +348,34 @@ class Dataset:
             user_pad_val,
             item_pad_val,
         )
-        all_sparse_unique_vals = {**sparse_unique_vals, **multi_sparse_unique_vals}
+
+        all_sparse_unique_vals = sparse_unique_vals | multi_sparse_unique_vals
         self.sparse_val_to_idx = {
             feat: self.make_id_mapping(unique_vals)
             for feat, unique_vals in all_sparse_unique_vals.items()
         }
 
-        feat_unique = dict()
-        if user_feat_data is not None:
-            feat_unique.update(
-                self.extract_unique_features(
-                    user_feat_data,
-                    user_sparse_cols,
-                    user_dense_cols,
-                    user_multi_sparse_cols,
-                    name="user",
-                )
+        user_feat_unique = (
+            self.extract_unique_features(
+                user_feat_data,
+                user_sparse_cols,
+                user_dense_cols,
+                user_multi_sparse_cols,
+                name="user",
             )
-        if item_feat_data is not None:
-            feat_unique.update(
-                self.extract_unique_features(
-                    item_feat_data,
-                    item_sparse_cols,
-                    item_dense_cols,
-                    item_multi_sparse_cols,
-                    name="item",
-                )
+            if user_feat_data is not None else {}
+        )
+        item_feat_unique = (
+            self.extract_unique_features(
+                item_feat_data,
+                item_sparse_cols,
+                item_dense_cols,
+                item_multi_sparse_cols,
+                name="item",
             )
+            if item_feat_data is not None else {}
+        )
+        feat_unique = user_feat_unique | item_feat_unique
 
         self.feat_info = FeatInfo(
             user_sparse_cols,
@@ -381,8 +384,8 @@ class Dataset:
             item_dense_cols,
             user_multi_sparse_cols,
             item_multi_sparse_cols,
-            feat_unique=feat_unique or None,
-            sparse_val_to_idx=self.sparse_val_to_idx or None,
+            feat_unique=feat_unique,
+            sparse_val_to_idx=self.sparse_val_to_idx,
         )
 
     @staticmethod
@@ -409,14 +412,9 @@ class Dataset:
                     raise ValueError(f"`{col}` does not exist in {name} feat data.")
             return result
 
-        sparse_unique_vals = {}
-        sparse_unique_vals.update(
-            _compute_unique(user_feat_data, user_sparse_cols, "user")
-        )
-        sparse_unique_vals.update(
-            _compute_unique(item_feat_data, item_sparse_cols, "item")
-        )
-        return sparse_unique_vals
+        user_unique_vals = _compute_unique(user_feat_data, user_sparse_cols, "user")
+        item_unique_vals = _compute_unique(item_feat_data, item_sparse_cols, "item")
+        return user_unique_vals | item_unique_vals
 
     @staticmethod
     def _get_multi_sparse_unique_vals(
@@ -457,6 +455,7 @@ class Dataset:
                 for col in field:
                     if col not in feat_data:
                         raise ValueError(f"`{col}` does not exist in {name} feat data.")
+
                 values = feat_data[field].T.to_numpy().tolist()
                 unique_vals = set(itertools.chain.from_iterable(values))
                 if pad_val[i] in unique_vals:
@@ -465,18 +464,13 @@ class Dataset:
                 result[field[0]] = np.sort(list(unique_vals))
             return result
 
-        multi_sparse_unique_vals = {}
-        multi_sparse_unique_vals.update(
-            _compute_unique(
-                user_feat_data, user_multi_sparse_cols, user_pad_val, "user"
-            )
+        user_unique_vals = _compute_unique(
+            user_feat_data, user_multi_sparse_cols, user_pad_val, "user"
         )
-        multi_sparse_unique_vals.update(
-            _compute_unique(
-                item_feat_data, item_multi_sparse_cols, item_pad_val, "item"
-            )
+        item_unique_vals = _compute_unique(
+            item_feat_data, item_multi_sparse_cols, item_pad_val, "item"
         )
-        return multi_sparse_unique_vals
+        return user_unique_vals | item_unique_vals
 
     def extract_unique_features(
         self,
@@ -544,8 +538,8 @@ class Dataset:
         feat_data = feat_data.copy()
         feat_data[col_name] = feat_data[col_name].map(mapping)
         feat_data = feat_data.dropna(subset=[col_name]).sort_values(col_name)
-        # NA value may result in float type
-        feat_data[col_name] = feat_data[col_name].astype("int64")
+        # NA value may result in float type, converting back to int
+        feat_data[col_name] = feat_data[col_name].astype(np.int64)
         return feat_data
 
     def _extract_sparse_unique(
@@ -555,6 +549,7 @@ class Dataset:
         feat_unique = {}
         if not sparse_cols:
             return feat_unique
+
         for col in sparse_cols:
             features = feat_data[col].tolist()
             mapping = self.sparse_val_to_idx[col]
@@ -571,6 +566,7 @@ class Dataset:
         feat_unique = {}
         if not multi_sparse_cols:
             return feat_unique
+
         for field in multi_sparse_cols:
             col_repr = field[0]
             shape = (len(feat_data) + 1, len(field))
@@ -591,6 +587,7 @@ class Dataset:
         feat_unique = dict()
         if not dense_cols:
             return feat_unique
+
         for col in dense_cols:
             oov = feat_data[col].median()
             data = feat_data[col].tolist()
@@ -644,7 +641,7 @@ class Dataset:
         from endrs.bases.cf_base import CfBase
         from endrs.bases.torch_base import TorchBase
 
-        if not isinstance(model, (TorchBase, CfBase)):
+        if not isinstance(model, TorchBase | CfBase):
             raise TypeError(
                 f"Model must be a subclass of TorchBase or CfBase, got {type(model).__name__}"
             )
