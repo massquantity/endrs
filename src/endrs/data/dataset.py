@@ -930,6 +930,7 @@ class HashDataset(Dataset):
         item2id, id2item = self.hasher.to_hash_mapping(
             ITEM_KEY, item_unique_vals.tolist(), include_reverse=True
         )
+
         if self.retrain:
             if self.id_converter is None:
                 raise RuntimeError(
@@ -939,23 +940,6 @@ class HashDataset(Dataset):
         else:
             return IdConverter(user2id, item2id, id2user, id2item)
 
-    def _build_feat_unique(
-        self, feat_data: pd.DataFrame, sparse_cols: Sequence[str], name: str
-    ):
-        col_name = self.user_col_name if name == "user" else self.item_col_name
-        feat_data = self._map_ids(feat_data, name)
-        ids = feat_data[col_name].to_numpy()
-        for col in sparse_cols:
-            mapping = self.sparse_val_to_idx[col]
-            data = feat_data[col].map(mapping).to_numpy()
-            if self.retrain:
-                all_hash_data = self.feat_unique[col]
-            else:
-                all_hash_data = np.full(self.n_hash_bins + 1, OOV_IDX)
-
-            all_hash_data[ids] = data
-            self.feat_unique[col] = all_hash_data
-
     def process_features(
         self,
         user_feat_data: pd.DataFrame | None = None,
@@ -964,28 +948,45 @@ class HashDataset(Dataset):
         item_sparse_cols: Sequence[str] | None = None,
         *_,
     ):
-        if not self.train_called:
-            raise RuntimeError("Trainset must be built before processing features.")
-        check_feat_cols(
-            self.user_col_name, self.item_col_name, user_sparse_cols, item_sparse_cols
-        )
+        """Process sparse features using hash-based value mapping.
+
+        Only sparse features are supported in hash mode. Dense and multi-sparse
+        features are ignored (captured by *_).
+
+        Processing flow:
+        1. Extract unique values for each sparse column
+        2. Build/update sparse_val_to_idx with hash mappings:
+           - New training: create fresh hash mappings for all values
+           - Retrain: merge new values' hash mappings into existing mappings
+        3. Initialize feat_unique (new training only; retrain uses model's copy)
+        4. Build feat_unique arrays via _build_feat_unique
+        5. Create FeatInfo (in retrain mode, also update model's feat_info)
+
+        Parameters
+        ----------
+        user_feat_data : pd.DataFrame, optional
+            DataFrame containing user features.
+        item_feat_data : pd.DataFrame, optional
+            DataFrame containing item features.
+        user_sparse_cols : Sequence[str], optional
+            Names of sparse categorical columns for users.
+        item_sparse_cols : Sequence[str], optional
+            Names of sparse categorical columns for items.
+        *_ : ignored
+            Dense and multi-sparse parameters are ignored in hash mode.
+        """
+        self._validate_feature_preconditions(user_sparse_cols, item_sparse_cols)
+
         sparse_unique_vals = self._get_sparse_unique_vals(
             user_feat_data, item_feat_data, user_sparse_cols, item_sparse_cols
         )
-        if self.retrain:
-            if self.feat_unique is None or self.sparse_val_to_idx is None:
-                raise ValueError(
-                    "Cannot add features during retrain if original model had no features"
-                )
-            for col, unique_vals in sparse_unique_vals.items():
-                val_to_idx = self.hasher.to_hash_mapping(col, unique_vals.tolist())
-                self.sparse_val_to_idx[col].update(val_to_idx)
-        else:
-            self.feat_unique = dict()
-            self.sparse_val_to_idx = {
-                col: self.hasher.to_hash_mapping(col, unique_vals.tolist())
-                for col, unique_vals in sparse_unique_vals.items()
-            }
+
+        self._build_sparse_val_to_idx(sparse_unique_vals)
+
+        # In new training mode, initialize feat_unique before _build_feat_unique.
+        # In retrain mode, feat_unique is already copied from model (validated above).
+        if not self.retrain:
+            self.feat_unique = {}
 
         if user_feat_data is not None and user_sparse_cols:
             self._build_feat_unique(user_feat_data, user_sparse_cols, "user")
@@ -995,9 +996,98 @@ class HashDataset(Dataset):
         self.feat_info = FeatInfo(
             user_sparse_cols,
             item_sparse_cols,
-            feat_unique=self.feat_unique or None,
-            sparse_val_to_idx=self.sparse_val_to_idx or None,
+            feat_unique=self.feat_unique,
+            sparse_val_to_idx=self.sparse_val_to_idx,
         )
 
         if self.retrain:
             self.model.feat_info = self.feat_info
+
+    def _validate_feature_preconditions(
+        self,
+        user_sparse_cols: Sequence[str] | None,
+        item_sparse_cols: Sequence[str] | None,
+    ):
+        """Validate preconditions for feature processing.
+
+        Checks:
+        1. Training data must be built first
+        2. Feature columns don't conflict with user/item ID columns
+        3. In retrain mode, original model must have features
+        4. In retrain mode, feature columns must match original model
+        """
+        if not self.train_called:
+            raise RuntimeError("Trainset must be built before processing features.")
+
+        check_feat_cols(
+            self.user_col_name, self.item_col_name, user_sparse_cols, item_sparse_cols
+        )
+
+        # Remaining checks only apply to retrain mode
+        if not self.retrain:
+            return
+        if self.feat_unique is None or self.sparse_val_to_idx is None:
+            raise ValueError(
+                "Cannot add features during retrain if original model had no features"
+            )
+
+        original_cols = set(self.sparse_val_to_idx.keys())
+        new_cols = set(user_sparse_cols or []) | set(item_sparse_cols or [])
+        if new_cols != original_cols:
+            missing = original_cols - new_cols
+            extra = new_cols - original_cols
+            raise ValueError(
+                f"Feature columns must match original model in retrain mode. "
+                f"Missing: {missing or 'none'}, Extra: {extra or 'none'}"
+            )
+
+    def _build_sparse_val_to_idx(self, sparse_unique_vals: dict[str, np.ndarray]):
+        """Build or update sparse_val_to_idx with hash mappings."""
+        if self.retrain:
+            for col, unique_vals in sparse_unique_vals.items():
+                val_to_idx = self.hasher.to_hash_mapping(col, unique_vals.tolist())
+                self.sparse_val_to_idx[col].update(val_to_idx)
+        else:
+            self.sparse_val_to_idx = {
+                col: self.hasher.to_hash_mapping(col, unique_vals.tolist())
+                for col, unique_vals in sparse_unique_vals.items()
+            }
+
+    def _build_feat_unique(
+        self, feat_data: pd.DataFrame, sparse_cols: Sequence[str], name: str
+    ):
+        """Build sparse feature arrays indexed by hash values.
+
+        Unlike the parent class which creates arrays of size (n_entities + 1)
+        indexed by sequential IDs, this method creates arrays of size
+        (n_hash_bins + 1) indexed by hash values. This allows direct indexing
+        via feat_array[hash_id] for any entity.
+
+        In retrain mode, the existing arrays are reused and only positions
+        corresponding to new data are updated, preserving features of
+        existing entities.
+
+        Parameters
+        ----------
+        feat_data : pd.DataFrame
+            Feature data containing entity ID and feature columns.
+        sparse_cols : Sequence[str]
+            Names of sparse categorical columns to process.
+        name : str
+            Either "user" or "item", used to determine ID column and mapping.
+        """
+        col_name = self.user_col_name if name == "user" else self.item_col_name
+        feat_data = self._map_ids(feat_data, name)
+        ids = feat_data[col_name].to_numpy()
+        for col in sparse_cols:
+            mapping = self.sparse_val_to_idx[col]
+            data = feat_data[col].map(mapping).to_numpy()
+            if self.retrain:
+                # Reuse existing array, update positions for new data
+                all_hash_data = self.feat_unique[col]
+            else:
+                # Create new array filled with OOV_IDX
+                all_hash_data = np.full(self.n_hash_bins + 1, OOV_IDX)
+
+            all_hash_data[ids] = data
+            self.feat_unique[col] = all_hash_data
