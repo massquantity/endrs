@@ -32,6 +32,8 @@ fn endrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(item_cf::save, m)?)?;
     m.add_function(wrap_pyfunction!(item_cf::load, m)?)?;
 
+    m.add_function(wrap_pyfunction!(consumed::build_consumed, m)?)?;
+
     m.add("__version__", VERSION)?;
     Ok(())
 }
