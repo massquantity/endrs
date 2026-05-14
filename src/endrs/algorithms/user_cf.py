@@ -3,10 +3,10 @@ from typing import ClassVar, Literal
 from endrs.bases.cf_base import CfBase
 from endrs.data.data_info import DataInfo
 from endrs.utils.sparse import SparseMatrix
-from endrs_ext import UserCF as RsUserCF
+from endrs_ext import UserCF as RsUserCF, load_user_cf, save_user_cf
 
 
-class UserCF(CfBase):
+class UserCF(CfBase[RsUserCF]):
     """User-based Collaborative Filtering model.
 
     Parameters
@@ -26,6 +26,16 @@ class UserCF(CfBase):
     """
 
     model_type: ClassVar[str] = "user_cf"
+    similarity_target: ClassVar[Literal["user", "item"]] = "user"
+    supported_tasks: ClassVar[frozenset[str]] = frozenset({"rating", "ranking"})
+
+    @staticmethod
+    def _save_rust_model(rs_model: RsUserCF, path: str, model_name: str) -> None:
+        save_user_cf(rs_model, path, model_name)
+
+    @staticmethod
+    def _load_rust_model(path: str, model_name: str) -> RsUserCF:
+        return load_user_cf(path, model_name)
 
     def __init__(
         self,

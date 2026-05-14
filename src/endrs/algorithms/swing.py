@@ -3,10 +3,10 @@ from typing import ClassVar, Literal
 from endrs.bases.cf_base import CfBase
 from endrs.data.data_info import DataInfo
 from endrs.utils.sparse import SparseMatrix
-from endrs_ext import Swing as RsSwing
+from endrs_ext import Swing as RsSwing, load_swing, save_swing
 
 
-class Swing(CfBase):
+class Swing(CfBase[RsSwing]):
     """Swing model for item similarity computation.
 
     Swing is an item-based collaborative filtering algorithm that computes
@@ -32,6 +32,16 @@ class Swing(CfBase):
     """
 
     model_type: ClassVar[str] = "swing"
+    similarity_target: ClassVar[Literal["user", "item"]] = "item"
+    supported_tasks: ClassVar[frozenset[str]] = frozenset({"ranking"})
+
+    @staticmethod
+    def _save_rust_model(rs_model: RsSwing, path: str, model_name: str) -> None:
+        save_swing(rs_model, path, model_name)
+
+    @staticmethod
+    def _load_rust_model(path: str, model_name: str) -> RsSwing:
+        return load_swing(path, model_name)
 
     def __init__(
         self,
@@ -43,9 +53,6 @@ class Swing(CfBase):
         num_threads: int = 1,
         seed: int = 42,
     ):
-        if task != "ranking":
-            raise ValueError(f"Swing only supports ranking task, got {task!r}")
-
         super().__init__(task, data_info, num_threads, seed)
         self.top_k = top_k
         self.alpha = alpha

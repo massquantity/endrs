@@ -2,9 +2,8 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, ClassVar, Literal, TypeVar
+from typing import ClassVar, Generic, Literal, TypeVar
 
 import joblib
 import numpy as np
@@ -21,69 +20,44 @@ from endrs.utils.logger import normal_log
 from endrs.utils.misc import show_start_time, time_block
 from endrs.utils.sparse import SparseMatrix, construct_sparse
 from endrs.utils.validate import check_labels
-from endrs_ext import (
-    load_item_cf,
-    load_swing,
-    load_user_cf,
-    save_item_cf,
-    save_swing,
-    save_user_cf,
-)
 
-# Type variable bound to CfBase and its subclasses (UserCF, ItemCF, Swing).
-# Used in classmethods like `load()` to preserve the concrete subclass type:
-#   - `Swing.load(...)` returns `Swing`, not `CfBase`
-#   - `UserCF.load(...)` returns `UserCF`, not `CfBase`
-# This enables proper type inference and IDE autocompletion for loaded models.
+# `_CfT` preserves the concrete subclass return type for `load()`, e.g.
+# `Swing.load(...)` returns `Swing`, not `CfBase`.
+# `_RustT` keeps each Python CF subclass tied to its corresponding Rust model type.
 _CfT = TypeVar("_CfT", bound="CfBase")
+_RustT = TypeVar("_RustT", bound=RustModel)
 
 
-@dataclass(frozen=True)
-class _ModelConfig:
-    """Configuration for a specific CF model type."""
-
-    display_name: str
-    save_fn: Callable[[RustModel, str, str], None]
-    load_fn: Callable[[str, str], RustModel]
-    is_user_based: bool
-
-
-_MODEL_CONFIGS: dict[str, _ModelConfig] = {
-    "user_cf": _ModelConfig(
-        display_name="UserCF",
-        save_fn=save_user_cf,
-        load_fn=load_user_cf,
-        is_user_based=True,
-    ),
-    "item_cf": _ModelConfig(
-        display_name="ItemCF",
-        save_fn=save_item_cf,
-        load_fn=load_item_cf,
-        is_user_based=False,
-    ),
-    "swing": _ModelConfig(
-        display_name="Swing",
-        save_fn=save_swing,
-        load_fn=load_swing,
-        is_user_based=False,
-    ),
-}
-
-
-class CfBase(ABC):
+class CfBase(ABC, Generic[_RustT]):
     """Internal base class for collaborative filtering models.
 
     This class should not be instantiated directly. Use UserCF, ItemCF, or Swing instead.
     """
 
     model_type: ClassVar[str]
+    similarity_target: ClassVar[Literal["user", "item"]]
+    supported_tasks: ClassVar[frozenset[str]]
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        if not hasattr(cls, "model_type") or cls.model_type not in _MODEL_CONFIGS:
+        if not isinstance(getattr(cls, "model_type", None), str) or not cls.model_type:
             raise TypeError(
-                f"{cls.__name__} must define a valid model_type class attribute "
-                f"(one of {list(_MODEL_CONFIGS.keys())})"
+                f"{cls.__name__} must define a non-empty model_type class attribute"
+            )
+
+        if getattr(cls, "similarity_target", None) not in ("user", "item"):
+            raise TypeError(
+                f"{cls.__name__} must define similarity_target as 'user' or 'item'"
+            )
+
+        supported_tasks = getattr(cls, "supported_tasks", None)
+        if (
+            not isinstance(supported_tasks, frozenset)
+            or not supported_tasks
+            or not all(isinstance(task, str) and task for task in supported_tasks)
+        ):
+            raise TypeError(
+                f"{cls.__name__} must define a non-empty supported_tasks frozenset[str]"
             )
 
     def __init__(
@@ -93,7 +67,12 @@ class CfBase(ABC):
         num_threads: int = 1,
         seed: int = 42,
     ):
-        self._cfg = _MODEL_CONFIGS[self.model_type]
+        if task not in self.supported_tasks:
+            supported = ", ".join(sorted(self.supported_tasks))
+            raise ValueError(
+                f"{self.display_name} only supports task(s): {supported}, got {task!r}"
+            )
+
         self.task = task
         self.data_info = data_info
         self.n_users = data_info.n_users
@@ -103,7 +82,12 @@ class CfBase(ABC):
         self.num_threads = num_threads
         self.seed = seed
         self.np_rng = np.random.default_rng(seed)
-        self.rs_model: RustModel | None = None
+        self.rs_model: _RustT | None = None
+
+    @property
+    def display_name(self) -> str:
+        """Return the model class name for logs and error messages."""
+        return type(self).__name__
 
     @property
     def is_fitted(self) -> bool:
@@ -122,8 +106,20 @@ class CfBase(ABC):
         self,
         user_interacts: SparseMatrix,
         item_interacts: SparseMatrix,
-    ) -> RustModel:
+    ) -> _RustT:
         """Create the Rust model. Subclasses must override this method."""
+        ...
+
+    @staticmethod
+    @abstractmethod
+    def _save_rust_model(rs_model: _RustT, path: str, model_name: str) -> None:
+        """Save the Rust model. Subclasses must override this method."""
+        ...
+
+    @staticmethod
+    @abstractmethod
+    def _load_rust_model(path: str, model_name: str) -> _RustT:
+        """Load the Rust model. Subclasses must override this method."""
         ...
 
     def fit(
@@ -206,10 +202,10 @@ class CfBase(ABC):
     def _log_similarity_stats(self) -> None:
         """Log similarity matrix statistics."""
         num = self.rs_model.num_sim_elements()
-        base = self.n_users if self._cfg.is_user_based else self.n_items
+        base = self.n_users if self.similarity_target == "user" else self.n_items
         density_ratio = 100 * num / base / base
         normal_log(
-            f"{self._cfg.display_name} num_elements: {num}, density: {density_ratio:5.4f} %"
+            f"{self.display_name} num_elements: {num}, density: {density_ratio:5.4f} %"
         )
 
     def evaluate(
@@ -297,7 +293,7 @@ class CfBase(ABC):
         unknown_num, _ = get_unknown(user, item)
         if unknown_num > 0 and cold_start != "popular":
             raise ValueError(
-                f"{self._cfg.display_name} only supports popular strategy"
+                f"{self.display_name} only supports popular strategy"
             )
 
         return self.rs_model.predict(user.tolist(), item.tolist())
@@ -340,7 +336,7 @@ class CfBase(ABC):
         if unknown_users:
             if cold_start != "popular":
                 raise ValueError(
-                    f"{self._cfg.display_name} only supports `popular` cold start strategy"
+                    f"{self.display_name} only supports `popular` cold start strategy"
                 )
             for u in unknown_users:
                 result_recs[u] = popular_recommendations(
@@ -387,11 +383,14 @@ class CfBase(ABC):
         model_state = {
             k: v
             for k, v in self.__dict__.items()
-            if k not in ("rs_model", "_cfg", "np_rng")
+            if k not in ("rs_model", "np_rng")
         }
+        model_state["_saved_model_type"] = self.model_type
         joblib.dump(model_state, f"{save_path}.joblib")
 
-        self._cfg.save_fn(self.rs_model, str(save_dir), model_name)
+        rs_model = self.rs_model
+        assert rs_model is not None
+        type(self)._save_rust_model(rs_model, str(save_dir), model_name)
 
     @classmethod
     def load(cls: type[_CfT], path: str | Path, model_name: str) -> _CfT:
@@ -413,15 +412,17 @@ class CfBase(ABC):
         load_path = load_dir / model_name
         model_state = joblib.load(f"{load_path}.joblib")
 
+        saved_model_type = model_state.pop("_saved_model_type", None)
+        if saved_model_type is not None and saved_model_type != cls.model_type:
+            raise ValueError(
+                f"Cannot load {saved_model_type!r} model with {cls.__name__}.load()"
+            )
+
         model = cls.__new__(cls)
         model.__dict__.update(model_state)
 
-        if model.model_type not in _MODEL_CONFIGS:
-            raise ValueError(f"Unknown model_type: {model.model_type}")
-        model._cfg = _MODEL_CONFIGS[model.model_type]
-
         model.np_rng = np.random.default_rng(model.seed)
-        model.rs_model = model._cfg.load_fn(str(load_dir), model_name)
+        model.rs_model = cls._load_rust_model(str(load_dir), model_name)
         return model
 
     def update_data_info(self, data_info: DataInfo):
